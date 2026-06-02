@@ -236,3 +236,8 @@ Open items:
 - Consider adding network isolation (unshare + nftables/iptables) in a
   future session.
 
+
+### 2026-06-02 — Agent guide added
+
+- Added AGENT_GUIDE.md: concise guidance for automated agents, including permitted actions, key commands, and important file locations. See AGENT_GUIDE.md for details.
+
