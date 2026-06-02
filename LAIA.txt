@@ -2,23 +2,42 @@ Local Agent Isolation Architecture
 
 Multi-Agent Sandboxing via Headless UNIX Namespaces
 
-This document establishes a local isolation containment strategy designed to run autonomous agents inside strict, independent security boundaries. This approach leverages native UNIX user, group, and filesystem controls combined with a hardened, dynamic sudo configuration to bypass the bloat and security leakages of modern GUI user accounts.
+This document establishes a local isolation containment strategy designed to run
+autonomous agents inside strict, independent security boundaries. This approach
+leverages native UNIX user, group, and filesystem controls combined with a
+hardened, dynamic sudo configuration to bypass the bloat and security leakages
+of modern GUI user accounts.
 
-Platform Requirements: Linux with shadow-utils (groupadd, useradd, visudo). Not compatible with macOS or BSD out of the box.
+Platform Requirements: Linux with shadow-utils (groupadd, useradd, visudo). Not
+compatible with macOS or BSD out of the box.
 
 1. Threat Model & Sandboxing Realities
 
-When running autonomous agents locally, the goal is to defend against credential exfiltration, prompt-injection exploits, and runaway file operations without paying the high resource and complexity costs of heavy virtual machines or complex Docker setups.
+When running autonomous agents locally, the goal is to defend against credential
+exfiltration, prompt-injection exploits, and runaway file operations without
+paying the high resource and complexity costs of heavy virtual machines or
+complex Docker setups.
 
-Targeted Credential Theft: CLI tools invoked by agents (like git or pip) will automatically traverse up to your host user's home directory (~/) to resolve sensitive files such as ~/.ssh/id_rsa, ~/.aws/credentials, or local shell history files.
+Targeted Credential Theft: CLI tools invoked by agents (like git or pip) will
+automatically traverse up to your host user's home directory (~/) to resolve
+sensitive files such as ~/.ssh/id_rsa, ~/.aws/credentials, or local shell
+history files.
 
-Blast Radius Containment: If Agent A (e.g., an experimental web scraper) is compromised via indirect prompt injection, it must be cryptographically and permission-wise blocked from reading or writing to the workspace of Agent B (e.g., a codebase-refactoring agent).
+Blast Radius Containment: If Agent A (e.g., an experimental web scraper) is
+compromised via indirect prompt injection, it must be cryptographically and
+permission-wise blocked from reading or writing to the workspace of Agent B
+(e.g., a codebase-refactoring agent).
 
-Environment Variable Hygiene: When you run a process on your machine, it inherits your shell's environment variables. Secrets like production API keys or DB credentials must never leak into the execution context of untrusted agent loops.
+Environment Variable Hygiene: When you run a process on your machine, it
+inherits your shell's environment variables. Secrets like production API keys or
+DB credentials must never leak into the execution context of untrusted agent
+loops.
 
 2. The Architecture: Headless Namespaces
 
-Instead of heavy GUI accounts or shared agent pools, we define a lightweight, templated system layout under a single /var/bot root directory. Each agent gets its own User, Group, Home, and Workspace.
+Instead of heavy GUI accounts or shared agent pools, we define a lightweight,
+templated system layout under a single /var/bot root directory. Each agent gets
+its own User, Group, Home, and Workspace.
 
                        /var/bot/ (0755 root:root)
                            │
@@ -31,15 +50,18 @@ Owner: clio:clio                            Owner: codex:codex
 ├── home/ (0700)                            ├── home/ (0700)
 └── work/ (2770, SGID)                      └── work/ (2770, SGID)
 
-By assigning a dedicated, unique group to each agent (e.g., group clio for user clio), we completely eliminate cross-agent read/write access.
+By assigning a dedicated, unique group to each agent (e.g., group clio for user
+clio), we completely eliminate cross-agent read/write access.
 
 3. Reference Implementation (Manual Commands)
 
-The following commands represent the underlying security system configuration steps.
+The following commands represent the underlying security system configuration
+steps.
 
 Step 1: Create the Agent Group & User
 
-Create a system-level group and user with no password, no login shell, and a designated isolated home directory.
+Create a system-level group and user with no password, no login shell, and a
+designated isolated home directory.
 
 # Define your agent name
 export BOT="clio"
@@ -58,17 +80,22 @@ sudo useradd --system \
 
 Step 2: Establish the Namespace and Permissions
 
-Set up the workspace where you and the agent will collaborate. By using the SGID (Set Group ID) bit on the workspace, we ensure file-sharing between your host user and the agent remains effortless and consistent.
+Set up the workspace where you and the agent will collaborate. By using the SGID
+(Set Group ID) bit on the workspace, we ensure file-sharing between your host
+user and the agent remains effortless and consistent.
 
 # Create the secure workspace and home hierarchy
 sudo mkdir -p "/var/bot/$BOT/work"
 
-# Set ownership: You own it, but the agent's dedicated group has collaborative access
+# Set ownership: You own it, but the agent's dedicated group has collaborative
+# access
 sudo chown -R $USER:"$BOT" "/var/bot/$BOT/work"
 
 # Enforce strict group permissions:
-# - '2': Sets the SGID bit. Files created in 'work/' inherit the '$BOT' group ownership.
-# - '770': Read/Write/Execute for you and the bot; zero access for everyone else.
+# - '2': Sets the SGID bit. Files created in 'work/' inherit the '$BOT' group
+#   ownership.
+# - '770': Read/Write/Execute for you and the bot; zero access for everyone
+#   else.
 sudo chmod 2770 "/var/bot/$BOT/work"
 
 # Ensure the agent's private home directory is fully locked down
@@ -78,9 +105,13 @@ sudo chown "$BOT":"$BOT" "/var/bot/$BOT/home"
 
 Step 3: Configure Wildcard-Free Sudo Rules
 
-To avoid opening security holes, explicitly authorize your host user to run commands as any user within the /var/bot sandbox ecosystem, without permitting them to run commands as root.
+To avoid opening security holes, explicitly authorize your host user to run
+commands as any user within the /var/bot sandbox ecosystem, without permitting
+them to run commands as root.
 
-This step is automated by botadm create (see Section 4). It writes a per-bot drop-in to /etc/sudoers.d/bot-<name> and validates it with visudo -cf. Use --no-sudoers to skip.
+This step is automated by botadm create (see Section 4). It writes a per-bot
+drop-in to /etc/sudoers.d/bot-<name> and validates it with visudo -cf. Use --no-
+sudoers to skip.
 
 Manual equivalent, for reference:
 
@@ -92,53 +123,101 @@ devuser ALL=(clio, codex) NOPASSWD: ALL
 
 4. Automation Suite: botadm
 
-To manage this layout cleanly, we run the dedicated companion tool botadm. It leverages Python's argparse standard library to govern user creation, directory partitioning via pathlib, secure permission masking, and sanitized target runtime environments.
+To manage this layout cleanly, we run the dedicated companion tool botadm. It
+leverages Python's argparse standard library to govern user creation, directory
+partitioning via pathlib, secure permission masking, and sanitized target
+runtime environments.
 
 System Configuration Lifecycle
 
-botadm init Initializes the base directory at /var/bot with strictly defined permissions (0755 root-owned), establishing the root namespace.
+botadm init Initializes the base directory at /var/bot with strictly defined
+    permissions (0755 root-owned), establishing the root namespace.
 
-botadm create [--no-sudoers]  Provisions the custom user and group namespaces, defines their secure home directory (0700 permission-locked), and sets up the collaborative workspace with dynamic SGID bits (2770) mapping the caller's ID and the target bot group. By default, also writes a validated sudoers drop-in to /etc/sudoers.d/bot-<name>. Use --no-sudoers to skip.
+botadm create [--no-sudoers] Provisions the custom user and group namespaces,
+    defines their secure home directory (0700 permission-locked), and sets up
+    the collaborative workspace with dynamic SGID bits (2770) mapping the
+    caller's ID and the target bot group. By default, also writes a validated
+    sudoers drop-in to /etc/sudoers.d/bot-<name>. Use --no-sudoers to skip.
 
-botadm disable  Instantly quarantines the bot namespace. The user account shell is forced to /usr/sbin/nologin and the directories are masked with 0000 permission settings to completely isolate ongoing filesystem interactions.
+botadm disable Instantly quarantines the bot namespace. The user account shell
+    is forced to /usr/sbin/nologin and the directories are masked with 0000
+    permission settings to completely isolate ongoing filesystem interactions.
 
-botadm destroy [--no-sudoers]  Reverses create: removes the sudoers drop-in, deletes the system user (with -r to remove home), deletes the system group, and removes the namespace directory tree under /var/bot/<name>. Use --no-sudoers to preserve the sudoers rule.
+botadm destroy [--no-sudoers] Reverses create: removes the sudoers drop-in,
+    deletes the system user (with -r to remove home), deletes the system group,
+    and removes the namespace directory tree under /var/bot/<name>. Use
+    --no-sudoers to preserve the sudoers rule.
 
 Sandboxed Execution Context
 
-botadm run   [args...] Clears the surrounding environmental variables using env -i, initializes localized paths, establishes safe umask 007 settings, and safely delegates control to the target bot user.
+botadm run [args...] Clears the surrounding environmental variables using
+    env -i, initializes localized paths, establishes safe umask 007 settings,
+    and safely delegates control to the target bot user.
 
 5. Design Decisions
 
 Per-Bot Sudoers Drop-Ins:
-Each agent receives its own sudoers file at /etc/sudoers.d/bot-<name> rather than sharing a single bot-rules file. This avoids parsing and editing existing sudoers syntax, makes per-agent cleanup a simple file deletion, and limits the blast radius of a malformed rule to a single agent.
+Each agent receives its own sudoers file at /etc/sudoers.d/bot-<name> rather
+than sharing a single bot-rules file. This avoids parsing and editing existing
+sudoers syntax, makes per-agent cleanup a simple file deletion, and limits the
+blast radius of a malformed rule to a single agent.
 
 Sudoers Automation (Opt-Out):
-botadm create configures the sudoers rule by default because the sandbox is unusable without sudo access to the target user. The --no-sudoers flag exists for environments with pre-existing sudoers management or strict change-control policies.
+botadm create configures the sudoers rule by default because the sandbox is
+unusable without sudo access to the target user. The --no-sudoers flag exists
+for environments with pre-existing sudoers management or strict change-control
+policies.
 
 0440 Permission on Sudoers Files:
-Standard sudoers drop-in files must be owned by root:root with 0440 permissions; visudo(8) enforces this requirement at validation time. The install helper writes at 0440 and validates with visudo -cf before considering the rule active.
+Standard sudoers drop-in files must be owned by root:root with 0440 permissions;
+visudo(8) enforces this requirement at validation time. The install helper
+writes at 0440 and validates with visudo -cf before considering the rule active.
 
 sudo -u vs sudo -i in Execution Context:
-The agent user's shell is /usr/sbin/nologin, which immediately rejects interactive login. Using sudo -i would invoke nologin as a login shell and fail. Instead, sudo -u bypasses the login shell entirely and delegates full environment control to env -i, which sets only the whitelisted variables (HOME, USER, LOGNAME, PATH, TERM, PWD).
+The agent user's shell is /usr/sbin/nologin, which immediately rejects
+interactive login. Using sudo -i would invoke nologin as a login shell and fail.
+Instead, sudo -u bypasses the login shell entirely and delegates full
+environment control to env -i, which sets only the whitelisted variables (HOME,
+USER, LOGNAME, PATH, TERM, PWD).
 
 Disable vs Destroy:
-These are semantically distinct operations. disable is a reversible quarantine — the account is locked and filesystem permissions are stripped (0000), but the data remains intact and the sudoers rule is preserved. destroy is permanent teardown — the user, group, data directory, and sudoers rule are all removed. This separation allows suspending an agent without losing state.
+These are semantically distinct operations. disable is a reversible quarantine —
+the account is locked and filesystem permissions are stripped (0000), but the
+data remains intact and the sudoers rule is preserved. destroy is permanent
+teardown — the user, group, data directory, and sudoers rule are all removed.
+This separation allows suspending an agent without losing state.
 
 Rollback Safety in Create:
-Provisioning is multi-step (group, user, directories, permissions, sudoers). If any step fails after partial progress, earlier steps are reversed in order: directories removed, user deleted, group deleted. This prevents orphaned system accounts and avoids leaving the system in an inconsistent state.
+Provisioning is multi-step (group, user, directories, permissions, sudoers). If
+any step fails after partial progress, earlier steps are reversed in order:
+directories removed, user deleted, group deleted. This prevents orphaned system
+accounts and avoids leaving the system in an inconsistent state.
 
 Platform Validation Before State Changes:
-The botadm commands check for required tools (groupadd, useradd, groupdel, userdel, visudo) before making any system modifications. This fails fast with a clear diagnostic rather than producing opaque error messages from missing commands midway through a multi-step operation.
+The botadm commands check for required tools (groupadd, useradd, groupdel,
+userdel, visudo) before making any system modifications. This fails fast with a
+clear diagnostic rather than producing opaque error messages from missing
+commands midway through a multi-step operation.
 
 Environment Hygiene in Run:
-env -i strips all inherited environment variables before setting a minimal whitelist. This ensures agent processes cannot inherit the host user's PATH, API keys, or database credentials. The whitelist is deliberately minimal — only what is strictly needed for predictable CLI tool behavior.
+env -i strips all inherited environment variables before setting a minimal
+whitelist. This ensures agent processes cannot inherit the host user's PATH, API
+keys, or database credentials. The whitelist is deliberately minimal — only what
+is strictly needed for predictable CLI tool behavior.
 
 umask 007:
-Files created inside the sandbox should be readable and writable by the agent's group (enabling transparent workspace collaboration with the host user via SGID) but inaccessible to all other system users. 007 grants group rwx while stripping world access entirely.
+Files created inside the sandbox should be readable and writable by the agent's
+group (enabling transparent workspace collaboration with the host user via SGID)
+but inaccessible to all other system users. 007 grants group rwx while stripping
+world access entirely.
 
 6. Limitations & Future Work
 
-Network Isolation: This design does not address network egress. A compromised agent with network access can still exfiltrate data. Future iterations could wrap the run command with unshare -n and iptables/nftables rules or use bpfilter to restrict outbound connections on a per-bot basis.
+Network Isolation: This design does not address network egress. A compromised
+agent with network access can still exfiltrate data. Future iterations could
+wrap the run command with unshare -n and iptables/nftables rules or use bpfilter
+to restrict outbound connections on a per-bot basis.
 
-Rollback Safety: The create subcommand cleans up partial state on failure (removing user, group, and directories if any intermediate step fails), but destroy is irreversible — use with care.
+Rollback Safety: The create subcommand cleans up partial state on failure
+(removing user, group, and directories if any intermediate step fails), but
+destroy is irreversible — use with care.
