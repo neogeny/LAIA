@@ -14,6 +14,12 @@ from pathlib import Path
 BOTROOT = Path("/var/bot")
 SUDOERS_DIR = Path("/etc/sudoers.d")
 
+# Agent environment defaults — editable dict for future learning/extensions.
+AGENT_ENV = {
+    "HISTFILE": "$HOME/.history",
+    "EDITOR": "nvim",
+}
+
 
 def checkroot():
     """Ensure administrative actions are running with root privileges."""
@@ -125,7 +131,9 @@ def cmdinit(args):
 
 
 def cmdcreate(args):
-    """Provision a new isolated agent namespace: user, group, dirs, and sudoers."""
+    """Provision a new isolated agent namespace: user, group, dirs, and sudoers.
+    Uses a single-directory layout and prompts for confirmation.
+    """
     checkroot()
     _check_platform()
     bot = args.bot
@@ -135,8 +143,6 @@ def cmdcreate(args):
         sys.exit(1)
 
     botdir = BOTROOT / bot
-    bothome = botdir / "home"
-    botwork = botdir / "work"
 
     if botdir.exists():
         print(f"Error: Agent '{bot}' already exists.", file=sys.stderr)
@@ -148,19 +154,43 @@ def cmdcreate(args):
     user_created = False
     dirs_created = False
 
+    # Determine invoking user and their PATH
+    realuser = getuser()
+    try:
+        real_path = subprocess.run(
+            ["sudo", "-u", realuser, "printenv", "PATH"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except Exception:
+        real_path = os.environ.get("PATH", "")
+
+    # Preview configuration and prompt for confirmation
+    print("\nConfiguration:")
+    print(f"  Agent: {bot}")
+    print(f"  Namespace directory: {botdir}")
+    print("  User shell: /bin/bash")
+    print(f"  Inherited PATH: {real_path or '(empty)'}")
+    print("\nProceed with creation? [y/N]: ", end="")
+    try:
+        ans = input().strip().lower()
+    except EOFError:
+        ans = "n"
+    if ans not in ("y", "yes"):
+        print("Aborted by user.")
+        sys.exit(1)
+
     try:
         subprocess.run(["groupadd", bot], check=True, capture_output=True)
         group_created = True
 
         subprocess.run(
             ["useradd", "--system", "--gid", bot,
-             "--home-dir", str(bothome), "--shell", "/usr/sbin/nologin", bot],
+             "--home-dir", str(botdir), "--shell", "/bin/bash", bot],
             check=True, capture_output=True,
         )
         user_created = True
 
-        bothome.mkdir(parents=True, exist_ok=True)
-        botwork.mkdir(parents=True, exist_ok=True)
+        botdir.mkdir(parents=True, exist_ok=True)
         dirs_created = True
 
         import pwd
@@ -168,22 +198,31 @@ def cmdcreate(args):
         try:
             botuid = pwd.getpwnam(bot).pw_uid
             botgid = grp.getgrnam(bot).gr_gid
-            realuser = getuser()
             realuid = pwd.getpwnam(realuser).pw_uid
         except KeyError as err:
             raise RuntimeError(f"System lookup failure: {err}")
 
-        os.chown(str(bothome), botuid, botgid)
-        os.chown(str(botwork), realuid, botgid)
+        # Set ownership and permissions: owner=invoking user, group=bot, SGID
         os.chown(str(botdir), realuid, botgid)
+        botdir.chmod(0o2770)
 
-        bothome.chmod(0o700)
-        botwork.chmod(0o2770)
-        botdir.chmod(0o750)
-
+        # Persist environment (store as key=value lines)
+        env_dict = AGENT_ENV.copy()
+        env_dict["PATH"] = real_path
         _laia_env = botdir / "env"
-        _laia_env.write_text(os.environ.get("PATH", ""))
+        _laia_env.write_text("\n".join(f"{k}={v}" for k, v in env_dict.items()) + "\n")
         _laia_env.chmod(0o640)
+
+        # Create standard bash config files owned by the bot user
+        profile = botdir / ".profile"
+        profile.write_text("\n".join(f'export {k}="{v}"' for k, v in env_dict.items()) + "\n")
+        profile.chmod(0o644)
+        os.chown(str(profile), botuid, botgid)
+
+        bashrc = botdir / ".bashrc"
+        bashrc.write_text('[[ -f /etc/bash.bashrc ]] && source /etc/bash.bashrc\n')
+        bashrc.chmod(0o644)
+        os.chown(str(bashrc), botuid, botgid)
 
     except Exception as err:
         print(f"Error: {err}", file=sys.stderr)
@@ -204,14 +243,76 @@ def cmdcreate(args):
         sudoers_installed = _install_sudoers(bot)
 
     print(f"\nSuccess! Agent '{bot}' created.")
-    print(f"-> Home: {bothome}")
-    print(f"-> Work: {botwork}")
+    print(f"-> Namespace: {botdir}")
     if sudoers_installed:
         print(f"-> Sudoers: automatically configured")
     else:
         realuser = getuser()
         print(f"\nTo enable execution, add this sudoers rule:")
         print(f"  {realuser} ALL=({bot}) NOPASSWD: ALL")
+
+
+def cmdupdate(args):
+    """Recreate configuration files for an existing bot namespace (Linux)."""
+    checkroot()
+    bot = args.bot
+
+    botdir = BOTROOT / bot
+    if not botdir.exists():
+        print(f"Error: Namespace '{botdir}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+
+    # Ensure system user exists
+    import pwd
+    try:
+        pwd.getpwnam(bot)
+    except KeyError:
+        print(f"Error: System user '{bot}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    # Determine invoking user and PATH
+    realuser = getuser()
+    try:
+        real_path = subprocess.run(
+            ["sudo", "-u", realuser, "printenv", "PATH"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except Exception:
+        real_path = os.environ.get("PATH", "")
+
+    import pwd
+    import grp
+    try:
+        botuid = pwd.getpwnam(bot).pw_uid
+        botgid = grp.getgrnam(bot).gr_gid
+        realuid = pwd.getpwnam(realuser).pw_uid
+    except KeyError as err:
+        print(f"Error: system lookup failed: {err}", file=sys.stderr)
+        sys.exit(1)
+
+    # Ensure directory ownership and permissions
+    os.chown(str(botdir), realuid, botgid)
+    botdir.chmod(0o2770)
+
+    # Persist environment (store as key=value lines)
+    env_dict = AGENT_ENV.copy()
+    env_dict["PATH"] = real_path
+    _laia_env = botdir / "env"
+    _laia_env.write_text("\n".join(f"{k}={v}" for k, v in env_dict.items()) + "\n")
+    _laia_env.chmod(0o640)
+
+    # Recreate bash configuration files owned by the bot user
+    profile = botdir / ".profile"
+    profile.write_text("\n".join(f'export {k}="{v}"' for k, v in env_dict.items()) + "\n")
+    profile.chmod(0o644)
+    os.chown(str(profile), botuid, botgid)
+
+    bashrc = botdir / ".bashrc"
+    bashrc.write_text('[[ -f /etc/bash.bashrc ]] && source /etc/bash.bashrc\n')
+    bashrc.chmod(0o644)
+    os.chown(str(bashrc), botuid, botgid)
+
+    print(f"-> Configuration for '{bot}' updated.")
 
 
 def cmddisable(args):
@@ -385,8 +486,8 @@ def cmdrun(args):
     command = args.command
 
     botroot = BOTROOT / bot
-    bothome = botroot / "home"
-    botwork = botroot / "work"
+    bothome = botroot
+    botwork = botroot
 
     if not botroot.is_dir():
         print(f"Error: Sandbox '{botroot}' does not exist.", file=sys.stderr)
@@ -394,7 +495,15 @@ def cmdrun(args):
 
     _laia_env = botroot / "env"
     if _laia_env.exists():
-        _stored_path = _laia_env.read_text().strip()
+        content = _laia_env.read_text()
+        env_from_file = {}
+        for line in content.splitlines():
+            if '=' in line:
+                k, v = line.split('=', 1)
+                env_from_file[k] = v
+        _stored_path = env_from_file.get("PATH", "").strip()
+        if not _stored_path:
+            _stored_path = "/usr/local/bin:/usr/bin:/bin"
     else:
         _stored_path = "/usr/local/bin:/usr/bin:/bin"
 
@@ -405,7 +514,7 @@ def cmdrun(args):
         f"PATH={_stored_path}",
         "TERM=xterm-256color",
         f"PWD={botwork}",
-        "PS1=\\[\\033[1;32m\\]\\u@bot\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
+        f"PS1=\[\033[1;32m\]\u@{bot}\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ ",
     ]
 
     sudocmd = [
@@ -438,6 +547,9 @@ def main():
         "--no-sudoers", action="store_true",
         help="Skip automatic sudoers drop-in configuration.",
     )
+
+    parser_update = subparsers.add_parser("update", help="Recreate configuration for an existing bot namespace.")
+    parser_update.add_argument("bot", help="Short name of the bot to update configuration for.")
 
     parser_disable = subparsers.add_parser("disable", help="Quarantine and lock an existing bot.")
     parser_disable.add_argument("bot", help="Short name of the bot to lock.")
@@ -473,6 +585,7 @@ def main():
     commands = {
         "init": cmdinit,
         "create": cmdcreate,
+        "update": cmdupdate,
         "disable": cmddisable,
         "destroy": cmddestroy,
         "share": cmdshare,
