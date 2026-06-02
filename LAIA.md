@@ -130,8 +130,9 @@ structure provides a system **User**, **Group**, **Home**, and shared
 
 /var/bot/clio/                    /var/bot/codex/
 Owner: clio:clio                  Owner: codex:codex
-├── home/ (0700)                  ├── home/ (0700)
-└── work/ (2770, SGID)            └── work/ (2770, SGID)
+Single-directory namespace: each agent uses /var/bot/<name> as its authoritative workspace.
+HOME, configuration files, and work files all live under the single namespace directory.
+The namespace directory is typically set with SGID and the permissions described below.
 ```
 
 By assigning a dedicated, unique system group to each agent (e.g., group `clio`
@@ -149,8 +150,8 @@ drwxr-x---   you   clio    clio/                   # agent clio's namespace
 drwxr-x---   you   codex   codex/                  # agent codex's namespace
 
 $ ls -la /var/bot/clio/
-drwx------   clio  clio    home/                   # agent-private (0700)
-drwxrwx---   you   clio    work/                   # agent staging (2770 SGID)
+drwxrws---   you   clio    clio/                   # single-directory namespace (SGID set)
+# The namespace contains configuration and data: /var/bot/clio (HOME and WORK inside)
 
 # Project shared with all agents via the bot group
 $ ls -la /path/to/project/
@@ -549,3 +550,39 @@ Smoke-test checklist (recommended):
 
 These changes are backward-compatible with the previous layout and preserve the
 security model described in this document.
+
+Operational gotchas and clarifications
+
+- macOS authorization dialogs: Some `dscl` operations may trigger an interactive
+  macOS authorization prompt (or require Terminal to be granted access in
+  System Settings / Security & Privacy). Approve the prompt or grant access if
+  the operation appears blocked.
+
+- `update` flag differences: `create` accepts `--no-sudoers` to skip writing
+  a sudoers drop-in. `update` does not accept `--no-sudoers` — it only
+  refreshes configuration files and permissions for an existing namespace.
+
+- env ownership semantics: The env file is written under the namespace with
+  mode 0640. The implementation writes the file (initially root-owned) and
+  then performs a best-effort `chown` to the bot user:bot group so the agent
+  can manage its live environment. If chown fails (permission or lookup
+  issues), the file remains readable by root and the bot group.
+
+- Shell behavior and login shells: macOS agents default to `zsh`, Linux agents
+  default to `bash`. The `update` subcommand attempts to set the system
+  user's login shell (best-effort) and warns if it cannot. The `shell`
+  subcommand launches a login interactive shell (`exec {shell} -l -i`) so
+  HOME and login init files are applied. Non-login `su`/`sudo` invocations may
+  preserve the invoking user's HOME unless run as a login session (e.g.
+  `sudo -u bot -i`).
+
+- dscl UID/GID allocation: On macOS, dscl UID/PrimaryGroupID allocation can
+  fail if the chosen ID collides or if system policies block changes. If a
+  create fails during UID assignment, re-run the create (or inspect the
+  directory service) and consider choosing a different UID range. The tool
+  attempts best-effort cleanup on partial failures.
+
+- visudo validation: The sudoers drop-in is validated with `visudo -cf` and
+  removed if invalid. If you maintain sudoers centrally, use `--no-sudoers`
+  during create and add your rule through your change-control process.
+
