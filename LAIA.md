@@ -14,6 +14,48 @@ approaches.
 
 ---
 
+## Quick Start
+
+These steps take you from zero to two collaborating agents in under a minute.
+
+```bash
+# 1. Initialize the sandbox root
+sudo python3 src/laia.py init
+
+# 2. Create two agents
+sudo python3 src/laia.py create clio
+sudo python3 src/laia.py create codex
+
+# 3. Add yourself to the shared bot group
+# macOS
+sudo dseditgroup -o edit -a $USER -t user bot
+# Linux
+# sudo usermod -aG bot $USER
+
+# 4. Create a shared project directory
+mkdir -p ~/laia-test
+sudo chgrp -R bot ~/laia-test
+sudo chmod -R g+rwX ~/laia-test
+
+# 5. Have each party create a file
+echo "hello from human" > ~/laia-test/human.txt
+sudo -u clio   sh -c 'echo "hello from clio"  > ~/laia-test/clio.txt'
+sudo -u codex  sh -c 'echo "hello from codex" > ~/laia-test/codex.txt'
+
+# 6. Verify everyone can read everything
+cat ~/laia-test/clio.txt
+cat ~/laia-test/codex.txt
+
+# 7. Verify cross-agent isolation (clio cannot access codex's workdir)
+sudo -u clio ls /var/bot/codex/work
+# should print: ls: .: Operation not permitted
+
+# 8. Run a command inside clio's sandbox
+python3 src/laia.py run clio whoami   # prints: clio
+```
+
+---
+
 ## 1. Threat Model & Sandboxing Realities
 
 When running autonomous agents locally, the goal is to defend against each of
@@ -36,6 +78,42 @@ tokens must never leak into untrusted agent execution contexts.
 
 **Filesystem Boundary Enforcement.** Without per-agent filesystem isolation, a
 single rogue agent can corrupt, ransom, or exfiltrate the entire project tree.
+
+### Capability Reference
+
+The table below shows what an agent can and cannot do once sandboxed. These
+results are from live tests on a macOS system; the same principles apply on
+Linux.
+
+| Action | Result | Why |
+|---|---|---|
+| Write to own `work/` | ✓ Allowed | SGID 2770, agent owns its group |
+| Write to own `home/` | ✓ Allowed | 0700 owned by agent |
+| Write to shared project (`bot` group) | ✓ Allowed | Member of `bot` group |
+| Write to `/tmp/` | ✓ Allowed | World-writable (sticky bit) |
+| Write to `/opt/homebrew/` (brew) | ✗ Blocked | Owned by `root:admin` |
+| Write to `/usr/local/` (brew, npm -g) | ✗ Blocked | Owned by `root:wheel` |
+| Read human's `~/.ssh/` | ✗ Blocked | 0700 owned by human |
+| Read human's `~/.aws/` | ✗ Blocked | 0700 owned by human |
+| Read another agent's `work/` | ✗ Blocked | Separate UNIX group |
+| Read another agent's `home/` | ✗ Blocked | 0700, different owner |
+| Escalate via `sudo` | ✗ Blocked | Agent user not in sudoers |
+| Send network requests | ✓ Allowed | No egress restrictions |
+| Read inherited environment vars | ✗ Blocked | `env -i` strips everything |
+
+The three most relevant real-world consequences:
+
+- **`brew install`** — fails because the agent cannot write to
+  `/opt/homebrew/` or `/usr/local/`. If you need an agent to install
+  packages, delegate: `botadm run clio brew install` asks `sudo` for a
+  password, which the human must provide interactively.
+
+- **`npm install -g`** — fails for the same reason. Per-project
+  `npm install` (without `-g`) works fine inside `work/` or a shared project.
+
+- **Credential exfiltration** — the agent has no access to `~/.ssh/`,
+  `~/.aws/`, `~/.config/git/`, or any other sensitive path owned by the
+  human. The sanitized environment ensures nothing leaks via variables either.
 
 ---
 
@@ -210,16 +288,17 @@ sudo chown "$BOT":"$BOT" "/var/bot/$BOT/home"
 ### Step 3: Configure Sudo Rules
 
 Authorize the host user to run commands as any bot user without permitting root
-escalation. This step is automated by `botadm create` (Section 4), but the
-manual equivalent is:
+escalation. `botadm create` automates this, but the manual equivalent is:
 
 ```bash
 # /etc/sudoers.d/bot-rules (created with visudo):
 devuser ALL=(clio, codex) NOPASSWD: ALL
 ```
 
-`botadm create` writes a per-bot drop-in to `/etc/sudoers.d/bot-<name>` and
-validates it with `visudo -cf`. Pass `--no-sudoers` to skip.
+Pass `--no-sudoers` to `botadm create` to skip the automation, then add the
+rule yourself. The bot-specific rule can be password-gated or `NOPASSWD` —
+either way, it only governs access *to* the bot user, not the bot user's
+access. The agent itself has no sudo privileges.
 
 ---
 
@@ -314,10 +393,32 @@ makes per-agent cleanup a simple `rm`, and limits the blast radius of a
 malformed rule to one agent.
 
 **Sudoers Automation (Opt-Out)**  
-`botadm create` writes the sudoers rule by default because the sandbox is
-unusable without sudo access to the target user. The `--no-sudoers` flag
-exists for environments with pre-existing sudoers management or strict
+`botadm create` writes the `NOPASSWD` sudoers rule by default because the
+sandbox is unusable without sudo access to the target user. The `--no-sudoers`
+flag exists for environments with pre-existing sudoers management or strict
 change-control policies.
+
+**Password-Gated Sudo (Host User)**  
+The bot-specific sudoers rule only governs access *to* the agent — it's a
+convenience, not a security control. The real defense-in-depth is the host
+user's own sudo access. On macOS, admin accounts have passwordless sudo by
+default (via `%admin` group rules). If an agent somehow achieves host-level
+code execution (e.g., via a shell injection that escapes the sandbox), that
+passwordless sudo becomes an escalation path.
+
+To password-gate your own sudo:
+
+```bash
+# Remove yourself from the admin group (macOS) — every sudo will prompt
+sudo dseditgroup -o edit -d $USER -t user admin
+
+# Or use a specific sudoers rule to require a password
+# /etc/sudoers.d/apalala:
+apalala ALL=(ALL) ALL
+```
+
+Trade-off: every `sudo` (including `botadm run`) will prompt for your
+password. This is the intended defense — a prompt the agent cannot answer.
 
 **`0440` on Sudoers Files**  
 Drop-in files must be owned by `root:root` with `0440` permissions;
