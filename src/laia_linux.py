@@ -470,96 +470,130 @@ def cmddestroy(args):
 
 
 def cmdshare(args):
-    """Share a directory with all bots via the shared 'bot' group."""
+    """Share paths with a named group (Linux).
+
+    Same rules as macOS: defaults to group 'bot' and current directory when --paths omitted.
+    Only supplementary group membership and group ownership are changed.
+    """
     checkroot()
 
     import grp
+    import pwd
+
+    group = args.group or "bot"
+    if args.paths:
+        targets = [Path(p).resolve() for p in args.paths.split(",") if p.strip()]
+    else:
+        targets = [Path.cwd()]
+
+    bots = []
+    if args.bots:
+        bots = [b.strip() for b in args.bots.split(",") if b.strip()]
+
+    # Check existence
     try:
-        grp.getgrnam("bot")
+        grp.getgrnam(group)
+        group_exists = True
     except KeyError:
-        print(
-            "Error: Shared group 'bot' does not exist. Run 'init' first.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        group_exists = False
 
-    path = Path(args.path).resolve()
-
-    if not path.is_dir():
-        print(f"Error: '{path}' is not a directory.", file=sys.stderr)
-        sys.exit(1)
-
-    # Refuse system paths
-    system_roots = {"/etc", "/usr", "/var", "/bin", "/sbin",
-                    "/opt", "/proc", "/sys", "/dev", "/run", "/root"}
-    if str(path) in system_roots:
-        print(f"Error: Refusing to share system root '{path}'.", file=sys.stderr)
-        sys.exit(1)
-
-    for parent in path.parents:
-        if str(parent) in system_roots:
-            print(f"Error: Refusing to share '{path}' under system path '{parent}'.",
-                  file=sys.stderr)
+    if args.create:
+        if group_exists:
+            print(f"Error: Group '{group}' already exists; --create must fail if group exists.", file=sys.stderr)
+            sys.exit(1)
+        try:
+            subprocess.run(["groupadd", group], check=True, capture_output=True)
+            print(f"-> Group '{group}' created.")
+            group_exists = True
+        except subprocess.CalledProcessError as err:
+            print(f"Error: could not create group '{group}': {err}", file=sys.stderr)
             sys.exit(1)
 
-    if str(path) == str(BOTROOT):
-        print(f"Error: Refusing to share bot root '{BOTROOT}'. "
-              "Share individual agent workdirs instead.", file=sys.stderr)
+    if not group_exists and not args.dry_run:
+        print(f"Error: Group '{group}' does not exist. Use --create to create it.", file=sys.stderr)
         sys.exit(1)
 
-    if args.dry_run:
-        print(f"[DRY RUN] Would set group=bot, SGID on '{path}'")
-    else:
-        subprocess.run(["chgrp", "bot", str(path)], check=True)
-        subprocess.run(["chmod", "g+rwxs", str(path)], check=True)
-        print(f"-> '{path}' is now shared with all bots (group=bot, SGID).")
+    # Validate targets
+    system_roots = {"/etc", "/usr", "/var", "/bin", "/sbin",
+                    "/opt", "/proc", "/sys", "/dev", "/run", "/root"}
+    for path in targets:
+        if not path.is_dir():
+            print(f"Error: '{path}' is not a directory.", file=sys.stderr)
+            sys.exit(1)
+        if str(path) in system_roots:
+            print(f"Error: Refusing to share system root '{path}'.", file=sys.stderr)
+            sys.exit(1)
+        for parent in path.parents:
+            if str(parent) in system_roots:
+                print(f"Error: Refusing to share '{path}' under system path '{parent}'.", file=sys.stderr)
+                sys.exit(1)
+        if str(path) == str(BOTROOT):
+            print(f"Error: Refusing to share bot root '{BOTROOT}'. Share individual agent workdirs instead.", file=sys.stderr)
+            sys.exit(1)
 
-    # Optionally fix existing files
-    if args.recursive:
+    # Confirmation
+    if not args.force and not args.dry_run:
+        print(f"About to operate on group='{group}' for paths: {', '.join(map(str, targets))}")
+        if bots:
+            print(f"Bots: {', '.join(bots)}")
+        ok = input("Proceed? [y/N]: ").strip().lower()
+        if ok != "y":
+            print("Aborting.")
+            sys.exit(1)
+
+    # Add/remove membership (Linux usermod / gpasswd)
+    if bots and args.add:
+        for bot in bots:
+            if args.dry_run:
+                print(f"[DRY RUN] Would add user '{bot}' to group '{group}' (usermod -aG)")
+            else:
+                try:
+                    subprocess.run(["usermod", "-aG", group, bot], check=True)
+                    print(f"-> User '{bot}' added to group '{group}'.")
+                except subprocess.CalledProcessError as err:
+                    print(f"Warning: could not add '{bot}' to '{group}': {err}", file=sys.stderr)
+
+    if bots and args.remove:
+        for bot in bots:
+            if args.dry_run:
+                print(f"[DRY RUN] Would remove user '{bot}' from group '{group}' (gpasswd -d)")
+            else:
+                try:
+                    subprocess.run(["gpasswd", "-d", bot, group], check=True)
+                    print(f"-> User '{bot}' removed from group '{group}'.")
+                except subprocess.CalledProcessError:
+                    print(f"Note: user '{bot}' was not a member of '{group}'.")
+
+    # Apply chgrp and mode to targets
+    chmod_mode = args.mode or "g+rwxs"
+    for path in targets:
         if args.dry_run:
-            print(f"[DRY RUN] Would recursively update files under '{path}'")
+            print(f"[DRY RUN] Would set group={group} and mode={chmod_mode} on '{path}'")
         else:
-            for root, dirs, files in os.walk(str(path)):
-                for name in files:
-                    fp = os.path.join(root, name)
-                    try:
-                        subprocess.run(["chgrp", "bot", fp], check=True, capture_output=True)
-                        subprocess.run(["chmod", "g+rw", fp], check=True, capture_output=True)
-                    except subprocess.CalledProcessError:
-                        pass
-                for name in dirs:
-                    dp = os.path.join(root, name)
-                    try:
-                        subprocess.run(["chgrp", "bot", dp], check=True, capture_output=True)
-                        subprocess.run(["chmod", "g+rwxs", dp], check=True, capture_output=True)
-                    except subprocess.CalledProcessError:
-                        pass
-            print("-> Existing files updated (recursive).")
-    elif not args.dry_run:
-        print("  (existing files not modified; use --recursive to update them)")
+            subprocess.run(["chgrp", group, str(path)], check=True)
+            subprocess.run(["chmod", chmod_mode, str(path)], check=True)
+            print(f"-> '{path}' group set to '{group}' and mode applied.")
 
-    if args.dry_run:
-        return
-
-    # Warn about sensitive files
-    sensitive = {".git", ".env", ".aws", ".ssh", ".config", ".gnupg"}
-    found = []
-    for entry in path.iterdir():
-        if entry.name in sensitive:
-            found.append(entry.name)
-    if found:
-        print(f"  Warning: sensitive entries found: {', '.join(found)}")
-        print("  Agents in the 'bot' group will be able to read these.")
-
-    # Check if human is in bot group
-    realuser = getuser()
-    try:
-        botgrp = grp.getgrnam("bot")
-        if realuser not in botgrp.gr_mem:
-            print("\n  Note: add yourself to the 'bot' group to access agent files:")
-            print(f"    sudo usermod -aG bot {realuser}")
-    except KeyError:
-        pass
+    # Optionally remove group entirely
+    if args.remove_group:
+        mygid = pwd.getpwuid(os.getuid()).pw_gid
+        mygroup = grp.getgrgid(mygid).gr_name
+        for path in targets:
+            if args.dry_run:
+                print(f"[DRY RUN] Would restore group of '{path}' to '{mygroup}'")
+            else:
+                subprocess.run(["chgrp", mygroup, str(path)], check=True)
+                print(f"-> Restored group of '{path}' to '{mygroup}'.")
+        # Delete the group
+        if args.dry_run:
+            print(f"[DRY RUN] Would delete group '{group}'")
+        else:
+            try:
+                subprocess.run(["groupdel", group], check=True)
+                print(f"-> Group '{group}' deleted.")
+            except subprocess.CalledProcessError as err:
+                print(f"Error: failed to delete group '{group}': {err}", file=sys.stderr)
+                sys.exit(1)
 
 
 def cmdrun(args):
