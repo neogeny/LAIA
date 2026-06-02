@@ -181,6 +181,10 @@ def cmdcreate(args):
         botwork.chmod(0o2770)
         botdir.chmod(0o750)
 
+        _laia_env = botdir / "env"
+        _laia_env.write_text(os.environ.get("PATH", ""))
+        _laia_env.chmod(0o640)
+
     except Exception as err:
         print(f"Error: {err}", file=sys.stderr)
         if dirs_created:
@@ -388,13 +392,20 @@ def cmdrun(args):
         print(f"Error: Sandbox '{botroot}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
+    _laia_env = botroot / "env"
+    if _laia_env.exists():
+        _stored_path = _laia_env.read_text().strip()
+    else:
+        _stored_path = "/usr/local/bin:/usr/bin:/bin"
+
     envargs = [
         f"HOME={bothome}",
         f"USER={bot}",
         f"LOGNAME={bot}",
-        "PATH=/usr/local/bin:/usr/bin:/bin",
+        f"PATH={_stored_path}",
         "TERM=xterm-256color",
         f"PWD={botwork}",
+        "PS1=\\[\\033[1;32m\\]\\u@bot\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
     ]
 
     sudocmd = [

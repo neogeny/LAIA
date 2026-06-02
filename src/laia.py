@@ -231,6 +231,10 @@ def cmdcreate(args):
         botwork.chmod(0o2770)
         botdir.chmod(0o750)
 
+        _laia_env = botdir / "env"
+        _laia_env.write_text(os.environ.get("PATH", ""))
+        _laia_env.chmod(0o640)
+
     except Exception as err:
         print(f"Error: {err}", file=sys.stderr)
         if dirs_created:
@@ -439,13 +443,20 @@ def cmdrun(args):
         print(f"Error: Sandbox '{botroot}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
+    _laia_env = botroot / "env"
+    if _laia_env.exists():
+        _stored_path = _laia_env.read_text().strip()
+    else:
+        _stored_path = "/usr/local/bin:/usr/bin:/bin"
+
     envargs = [
         f"HOME={bothome}",
         f"USER={bot}",
         f"LOGNAME={bot}",
-        "PATH=/usr/local/bin:/usr/bin:/bin",
+        f"PATH={_stored_path}",
         "TERM=xterm-256color",
         f"PWD={botwork}",
+        "PS1=\\[\\033[1;32m\\]\\u@bot\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
     ]
 
     sudocmd = [
@@ -458,6 +469,49 @@ def cmdrun(args):
     try:
         result = subprocess.run(sudocmd, check=True)
         sys.exit(result.returncode)
+    except subprocess.CalledProcessError as err:
+        sys.exit(err.returncode)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+def cmdshell(args):
+    """Launch an interactive shell inside the bot's sandbox."""
+    bot = args.bot
+    shell = args.shell
+
+    botroot = BOTROOT / bot
+    bothome = botroot / "home"
+    botwork = botroot / "work"
+
+    if not botroot.is_dir():
+        print(f"Error: Sandbox '{botroot}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+
+    _laia_env = botroot / "env"
+    if _laia_env.exists():
+        _stored_path = _laia_env.read_text().strip()
+    else:
+        _stored_path = "/usr/local/bin:/usr/bin:/bin"
+
+    envargs = [
+        f"HOME={bothome}",
+        f"USER={bot}",
+        f"LOGNAME={bot}",
+        f"PATH={_stored_path}",
+        "TERM=xterm-256color",
+        f"PWD={botwork}",
+        "PS1=\\[\\033[1;32m\\]\\u@bot\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
+    ]
+
+    sudocmd = [
+        "sudo", "-u", bot,
+        "env", "-i", *envargs,
+        shell, "-c", f"cd '{botwork}' && exec {shell} -i",
+    ]
+
+    try:
+        subprocess.run(sudocmd, check=True)
     except subprocess.CalledProcessError as err:
         sys.exit(err.returncode)
     except KeyboardInterrupt:
@@ -508,6 +562,15 @@ def main():
     parser_run.add_argument("bot", help="Name of the bot container to execute in.")
     parser_run.add_argument("command", nargs=argparse.REMAINDER, help="Command and arguments to run.")
 
+    parser_shell = subparsers.add_parser(
+        "shell", help="Launch an interactive shell inside a bot's sandbox."
+    )
+    parser_shell.add_argument("bot", help="Name of the bot container to enter.")
+    parser_shell.add_argument(
+        "--shell", "-s", default="bash",
+        help="Shell to launch (default: bash).",
+    )
+
     args = parser.parse_args()
 
     commands = {
@@ -517,6 +580,7 @@ def main():
         "destroy": cmddestroy,
         "share": cmdshare,
         "run": cmdrun,
+        "shell": cmdshell,
     }
 
     commands[args.action](args)
