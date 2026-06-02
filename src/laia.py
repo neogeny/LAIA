@@ -534,33 +534,32 @@ def cmddestroy(args):
     print(f"Agent '{bot}' destroyed.")
 
 
-def cmdshare(args):
-    """Share paths with a named group.
 
-    Behavior:
-    - Default group: "bot". Use names exactly as provided.
-    - Default target paths: current working directory if --paths not provided.
-    - Only group membership and group ownership (chgrp) are changed; file user ownership is preserved.
+
+def cmdshare(args):
+    """Share paths with a named group (macOS).
+
+    - Default group: 'bot'.
+    - Default path: current working directory when --path omitted.
+    - When --bots provided, replace group's membership with the exact list.
     """
     checkroot()
     _check_platform()
-
     import grp
     import pwd
 
     group = args.group or "bot"
-    # Parse target paths
-    if args.paths:
-        targets = [Path(p).resolve() for p in args.paths.split(",") if p.strip()]
+    # parse targets from --path
+    if getattr(args, 'path', None):
+        targets = [Path(p).resolve() for p in args.path.split(",") if p.strip()]
     else:
         targets = [Path.cwd()]
 
-    # Parse bots list
+    # parse bots
     bots = []
-    if args.bots:
+    if getattr(args, 'bots', None):
         bots = [b.strip() for b in args.bots.split(",") if b.strip()]
 
-    # Pre-checks
     try:
         grp.getgrnam(group)
         group_exists = True
@@ -571,11 +570,10 @@ def cmdshare(args):
         if group_exists:
             print(f"Error: Group '{group}' already exists; --create must fail if group exists.", file=sys.stderr)
             sys.exit(1)
-        # Create group (macOS DSCL flow)
         gid = _free_id("Groups", "PrimaryGroupID")
         ok = _dscl_quiet("-create", f"/Groups/{group}") and \
-            _dscl_quiet("-create", f"/Groups/{group}", "PrimaryGroupID", str(gid)) and \
-            _dscl_quiet("-create", f"/Groups/{group}", "Password", "*")
+             _dscl_quiet("-create", f"/Groups/{group}", "PrimaryGroupID", str(gid)) and \
+             _dscl_quiet("-create", f"/Groups/{group}", "Password", "*")
         if not ok:
             print(f"Error: failed to create group '{group}'", file=sys.stderr)
             sys.exit(1)
@@ -586,7 +584,7 @@ def cmdshare(args):
         print(f"Error: Group '{group}' does not exist. Use --create to create it.", file=sys.stderr)
         sys.exit(1)
 
-    # Validate targets
+    # validate targets
     system_roots = {"/etc", "/usr", "/var", "/System", "/bin", "/sbin",
                     "/opt", "/Library", "/Network", "/home"}
     for path in targets:
@@ -604,7 +602,7 @@ def cmdshare(args):
             print(f"Error: Refusing to share bot root '{BOTROOT}'. Share individual agent workdirs instead.", file=sys.stderr)
             sys.exit(1)
 
-    # Confirmation
+    # confirmation
     if not args.force and not args.dry_run:
         print(f"About to operate on group='{group}' for paths: {', '.join(map(str, targets))}")
         if bots:
@@ -614,29 +612,36 @@ def cmdshare(args):
             print("Aborting.")
             sys.exit(1)
 
-    # Add/remove membership
-    if bots and args.add:
-        for bot in bots:
-            if args.dry_run:
-                print(f"[DRY RUN] Would add user '{bot}' to group '{group}' (DSCL)")
-            else:
-                try:
-                    _dscl("-merge", f"/Groups/{group}", "GroupMembership", bot)
-                    print(f"-> User '{bot}' added to group '{group}'.")
-                except subprocess.CalledProcessError as err:
-                    print(f"Warning: could not add '{bot}' to '{group}': {err}", file=sys.stderr)
+    # set exact membership when --bots provided
+    if bots:
+        if args.dry_run:
+            print(f"[DRY RUN] Would set group '{group}' membership to: {', '.join(bots)}")
+        else:
+            try:
+                result = subprocess.run(["dscl", ".", "-read", f"/Groups/{group}", "GroupMembership"], capture_output=True, text=True)
+                current = []
+                if result.returncode == 0:
+                    parts = result.stdout.strip().split()
+                    if len(parts) >= 2:
+                        current = parts[1:]
+            except subprocess.CalledProcessError:
+                current = []
 
-    if bots and args.remove:
-        for bot in bots:
-            if args.dry_run:
-                print(f"[DRY RUN] Would remove user '{bot}' from group '{group}' (DSCL)")
-            else:
-                if _dscl_quiet("-delete", f"/Groups/{group}", "GroupMembership", bot):
-                    print(f"-> User '{bot}' removed from group '{group}'.")
-                else:
-                    print(f"Note: user '{bot}' was not a member of '{group}'.")
+            # remove members not desired
+            for m in list(current):
+                if m not in bots:
+                    _dscl_quiet("-delete", f"/Groups/{group}", "GroupMembership", m)
+                    print(f"-> Removed '{m}' from '{group}'.")
+            # add desired members
+            for m in bots:
+                if m not in current:
+                    try:
+                        _dscl("-merge", f"/Groups/{group}", "GroupMembership", m)
+                        print(f"-> Added '{m}' to '{group}'.")
+                    except subprocess.CalledProcessError as err:
+                        print(f"Warning: could not add '{m}' to '{group}': {err}", file=sys.stderr)
 
-    # Apply chgrp and mode to targets
+    # apply chgrp and mode to targets
     chmod_mode = args.mode or "g+rwxs"
     for path in targets:
         if args.dry_run:
@@ -646,26 +651,54 @@ def cmdshare(args):
             subprocess.run(["chmod", chmod_mode, str(path)], check=True)
             print(f"-> '{path}' group set to '{group}' and mode applied.")
 
-    # Optionally remove group entirely
-    if args.remove_group:
-        # Restore group ownership of targets to invoking user's primary group
-        mygid = pwd.getpwuid(os.getuid()).pw_gid
-        mygroup = grp.getgrgid(mygid).gr_name
-        for path in targets:
-            if args.dry_run:
-                print(f"[DRY RUN] Would restore group of '{path}' to '{mygroup}'")
-            else:
-                subprocess.run(["chgrp", mygroup, str(path)], check=True)
-                print(f"-> Restored group of '{path}' to '{mygroup}'.")
-        # Delete the group
+    return
+
+
+def cmdnoshare(args):
+    """Restore group ownership to invoking user's primary group and delete the named group (macOS)."""
+    checkroot()
+    _check_platform()
+    import grp
+    import pwd
+
+    group = args.group or "bot"
+    if getattr(args, 'path', None):
+        targets = [Path(p).resolve() for p in args.path.split(",") if p.strip()]
+    else:
+        targets = [Path.cwd()]
+
+    try:
+        grp.getgrnam(group)
+    except KeyError:
+        print(f"Error: Group '{group}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+
+    # confirmation
+    if not args.force and not args.dry_run:
+        print(f"About to remove sharing for group='{group}' on: {', '.join(map(str, targets))}")
+        ok = input("Proceed? [y/N]: ").strip().lower()
+        if ok != "y":
+            print("Aborting.")
+            sys.exit(1)
+
+    mygid = pwd.getpwuid(os.getuid()).pw_gid
+    mygroup = grp.getgrgid(mygid).gr_name
+    for path in targets:
         if args.dry_run:
-            print(f"[DRY RUN] Would delete group '{group}'")
+            print(f"[DRY RUN] Would restore group of '{path}' to '{mygroup}'")
         else:
-            if _dscl_quiet("-delete", f"/Groups/{group}"):
-                print(f"-> Group '{group}' deleted.")
-            else:
-                print(f"Error: failed to delete group '{group}'", file=sys.stderr)
-                sys.exit(1)
+            subprocess.run(["chgrp", mygroup, str(path)], check=True)
+            print(f"-> Restored group of '{path}' to '{mygroup}'.")
+
+    if args.dry_run:
+        print(f"[DRY RUN] Would delete group '{group}'")
+        return
+
+    if _dscl_quiet("-delete", f"/Groups/{group}"):
+        print(f"-> Group '{group}' deleted.")
+    else:
+        print(f"Error: failed to delete group '{group}'", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmdrun(args):
@@ -820,24 +853,13 @@ def main():
         "--group", "-g", default="bot",
         help="Group name to operate on (default: 'bot'). Use the name exactly as provided.",
     )
+    # Mutually exclusive: create OR bots
+    mutex = parser_share.add_mutually_exclusive_group()
+    mutex.add_argument("--create", action="store_true", help="Create the named group. Fails if the group already exists.")
+    mutex.add_argument("--bots", "-b", help="Comma-separated list of bot user names; when provided set membership to exactly this list.")
+
     parser_share.add_argument(
-        "--bots", "-b",
-        help="Comma-separated list of bot user names to add/remove from the group (no prefixes).",
-    )
-    parser_share.add_argument(
-        "--add", action="store_true", help="Add the listed bots to the group (default when --bots provided).",
-    )
-    parser_share.add_argument(
-        "--remove", action="store_true", help="Remove the listed bots from the group.",
-    )
-    parser_share.add_argument(
-        "--create", action="store_true", help="Create the named group. Fails if the group already exists.",
-    )
-    parser_share.add_argument(
-        "--remove-group", action="store_true", help="Remove the named group after restoring ownership of targets to the invoking user's primary group.",
-    )
-    parser_share.add_argument(
-        "--paths", help="Comma-separated list of target paths to operate on (default: current working directory).",
+        "--path", help="Comma-separated list of target paths to operate on (default: current working directory).",
     )
     parser_share.add_argument(
         "--mode", help="Filesystem mode to apply to targets (symbolic chmod string, default: g+rwxs).",
@@ -847,6 +869,14 @@ def main():
     )
     parser_share.add_argument("--force", "-f", action="store_true", help="Skip interactive confirmation prompts.")
     parser_share.add_argument("--verbose", action="store_true", help="Print detailed action logs.")
+
+    # 'noshare' — inverse of share: restore ownership and delete a group
+    parser_noshare = subparsers.add_parser("noshare", help="Stop sharing: restore group ownership to invoking user and delete a group.")
+    parser_noshare.add_argument("--group", "-g", default="bot", help="Group name to remove (default: bot). Use the name exactly as provided.")
+    parser_noshare.add_argument("--path", help="Comma-separated list of target paths (default: current working directory).")
+    parser_noshare.add_argument("--dry-run", "-n", action="store_true", help="Show actions without making changes.")
+    parser_noshare.add_argument("--force", "-f", action="store_true", help="Skip interactive confirmation prompts.")
+    parser_noshare.add_argument("--verbose", action="store_true", help="Print detailed action logs.")
 
     parser_run = subparsers.add_parser("run", help="Run a command securely inside a bot's sandbox.")
     parser_run.add_argument("bot", help="Name of the bot container to execute in.")
@@ -871,6 +901,7 @@ def main():
         "disable": cmddisable,
         "destroy": cmddestroy,
         "share": cmdshare,
+        "noshare": cmdnoshare,
         "run": cmdrun,
         "shell": cmdshell,
     }
