@@ -1,2 +1,1 @@
-# LAIA
-Local Agent Isolation Architecture
+LAIA.md
