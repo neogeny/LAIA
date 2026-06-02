@@ -8,7 +8,6 @@ execution using the macOS Directory Service command-line tool.
 import sys
 import os
 import shutil
-import re
 import subprocess
 import argparse
 from pathlib import Path
@@ -309,7 +308,7 @@ def cmdcreate(args):
         print("-> Sudoers: automatically configured")
     else:
         realuser = getuser()
-        print(f"\nTo enable execution, add this sudoers rule:")
+        print("\nTo enable execution, add this sudoers rule:")
         print(f"  {realuser} ALL=({bot}) NOPASSWD: ALL")
 
 
@@ -627,7 +626,7 @@ def cmdshare(args):
             capture_output=True, text=True,
         )
         if realuser not in members.stdout:
-            print(f"\n  Note: add yourself to the 'bot' group to access agent files:")
+            print("\n  Note: add yourself to the 'bot' group to access agent files:")
             print(f"    sudo dseditgroup -o edit -a {realuser} -t user bot")
     except subprocess.CalledProcessError:
         pass

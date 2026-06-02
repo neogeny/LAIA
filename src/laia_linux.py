@@ -254,10 +254,10 @@ def cmdcreate(args):
     print(f"\nSuccess! Agent '{bot}' created.")
     print(f"-> Namespace: {botdir}")
     if sudoers_installed:
-        print(f"-> Sudoers: automatically configured")
+        print("-> Sudoers: automatically configured")
     else:
         realuser = getuser()
-        print(f"\nTo enable execution, add this sudoers rule:")
+        print("\nTo enable execution, add this sudoers rule:")
         print(f"  {realuser} ALL=({bot}) NOPASSWD: ALL")
 
 
@@ -358,7 +358,7 @@ def cmddisable(args):
         for subdir in botdir.iterdir():
             subdir.chmod(0o000)
         botdir.chmod(0o000)
-        print(f"-> Filesystem permissions stripped (0000 quarantine).")
+        print("-> Filesystem permissions stripped (0000 quarantine).")
     else:
         print(f"Error: Namespace for '{bot}' not found.", file=sys.stderr)
         sys.exit(1)
@@ -388,9 +388,9 @@ def cmdenable(args):
 
     botdir = BOTROOT / bot
     if botdir.exists():
-        import pwd, grp
+        import pwd
+        import grp
         try:
-            botuid = pwd.getpwnam(bot).pw_uid
             botgid = grp.getgrnam(bot).gr_gid
             realuser = getuser()
             realuid = pwd.getpwnam(realuser).pw_uid
@@ -556,7 +556,7 @@ def cmdshare(args):
     try:
         botgrp = grp.getgrnam("bot")
         if realuser not in botgrp.gr_mem:
-            print(f"\n  Note: add yourself to the 'bot' group to access agent files:")
+            print("\n  Note: add yourself to the 'bot' group to access agent files:")
             print(f"    sudo usermod -aG bot {realuser}")
     except KeyError:
         pass
