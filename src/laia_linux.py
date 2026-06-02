@@ -86,6 +86,32 @@ def _remove_sudoers(bot):
         print(f"-> Sudoers rule removed: {sudoers_path}")
 
 
+def _ensure_bot_group():
+    """Create the shared 'bot' group if it doesn't already exist."""
+    result = subprocess.run(
+        ["groupadd", "--force", "bot"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        print("-> Shared group 'bot' created.")
+    else:
+        # groupadd --force with existing group returns 0, so non-zero is a real error
+        import grp
+        try:
+            grp.getgrnam("bot")
+        except KeyError:
+            print(f"Warning: could not create shared group 'bot': {result.stderr.strip()}", file=sys.stderr)
+
+
+def _add_to_bot_group(bot):
+    """Add an agent user to the shared 'bot' supplementary group."""
+    try:
+        subprocess.run(["usermod", "-aG", "bot", bot], check=True, capture_output=True)
+        print(f"-> User '{bot}' added to shared group 'bot'.")
+    except subprocess.CalledProcessError as err:
+        print(f"Warning: could not add '{bot}' to 'bot' group: {err.stderr.decode().strip()}", file=sys.stderr)
+
+
 def cmdinit(args):
     """Initialize the master sandbox container directory at /var/bot."""
     checkroot()
@@ -94,6 +120,7 @@ def cmdinit(args):
     BOTROOT.mkdir(parents=True, exist_ok=True)
     os.chown(str(BOTROOT), 0, 0)
     BOTROOT.chmod(0o755)
+    _ensure_bot_group()
     print("Initialization complete.")
 
 
@@ -163,6 +190,10 @@ def cmdcreate(args):
         if group_created:
             subprocess.run(["groupdel", bot], capture_output=True)
         sys.exit(1)
+
+    # Add agent to the shared bot group (non-fatal if it fails)
+    _ensure_bot_group()
+    _add_to_bot_group(bot)
 
     sudoers_installed = False
     if not args.no_sudoers:

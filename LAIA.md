@@ -59,9 +59,75 @@ Owner: clio:clio                  Owner: codex:codex
 
 By assigning a dedicated, unique system group to each agent (e.g., group `clio`
 for user `clio`), cross-agent read/write access is eliminated at the OS level.
-The SGID bit on `work/` ensures files created by either the host user or the
-agent inherit the bot's group ownership, making collaboration seamless without
-world-readable permissions.
+Every agent also belongs to a shared supplementary group `bot` for multi-agent
+project collaboration.
+
+Here is the full permission scheme in practice:
+
+```
+# Sandbox infrastructure — each agent isolated by its own group
+$ ls -la /var/bot/
+drwxr-xr-x   root  root    .                       # world-traversable
+drwxr-x---   you   clio    clio/                   # agent clio's namespace
+drwxr-x---   you   codex   codex/                  # agent codex's namespace
+
+$ ls -la /var/bot/clio/
+drwx------   clio  clio    home/                   # agent-private (0700)
+drwxrwx---   you   clio    work/                   # agent staging (2770 SGID)
+
+# Project shared with all agents via the bot group
+$ ls -la /path/to/project/
+drwxrwx---   you   bot     .                       # owner rwx, group rwx
+-rw-rw----   you   bot     README.md               # owner rw, group rw
+-rw-rw----   you   bot     main.py
+```
+
+### How files are owned and accessed
+
+| Directory | New file owned by | Human access | Agent access |
+|---|---|---|---|
+| `home/` (0700) | `clio:clio` | `sudo` only | `clio` only |
+| `work/` (2770, SGID) | creator:`clio` | via group or `sudo` | via group |
+| Shared project (2770, SGID) | creator:`bot` | via `bot` group | via `bot` group |
+
+The SGID bit on `work/` and on shared projects ensures files inherit the
+directory's group regardless of who created them — no manual `chgrp` after
+every edit.
+
+### What you need to join
+
+For the shared project, **you must join the `bot` group** — otherwise files
+agents create there are owned by `clio:bot` and you have neither ownership nor
+group access:
+
+```bash
+# Linux
+sudo usermod -aG bot $USER
+# macOS
+sudo dseditgroup -o edit -a $USER -t user bot
+```
+
+For an agent's `work/` directory, you have two choices:
+
+- **Join the agent's group** — gives you direct read/write access to
+  agent-created files without `sudo`:
+  ```bash
+  # Linux
+  sudo usermod -aG clio $USER
+  # macOS
+  sudo dseditgroup -o edit -a $USER -t user clio
+  ```
+- **Use `sudo` or `botadm run`** — read agent output by running commands as
+  the agent:
+  ```bash
+  sudo -u clio cat /var/bot/clio/work/output.txt
+  botadm run clio cat /var/bot/clio/work/output.txt
+  ```
+
+Joining an agent's group does not reduce security — you already have root
+access via `sudo`. The real isolation boundary is between agents, and that
+remains intact: `codex` is not in group `clio` and cannot access `clio`'s
+files.
 
 ---
 
@@ -107,9 +173,23 @@ sudo dscl . -create /Users/"$BOT" Password "*"
 
 ### Step 2: Establish the Namespace and Permissions
 
-The SGID bit on `work/` is the key mechanism: files created by either party
-inherit the bot's group, so explicit `chown` after every operation is
-unnecessary.
+Create the shared `bot` group that all agents will belong to:
+
+**Linux:**
+```bash
+sudo groupadd --force bot
+```
+
+**macOS:**
+```bash
+sudo dscl . -create /Groups/bot
+sudo dscl . -create /Groups/bot PrimaryGroupID 440
+sudo dscl . -create /Groups/bot Password "*"
+```
+
+Then set up the workspace hierarchy. The SGID bit on `work/` is the key
+mechanism: files created by either party inherit the bot's group, so explicit
+`chown` after every operation is unnecessary.
 
 ```bash
 # Create the workspace and home hierarchy
@@ -163,8 +243,9 @@ operations differ.
 #### `botadm init`
 
 Initializes the root namespace at `/var/bot` with strict ownership
-(`root:root`) and permissions (`0755`). Must be run once before any other
-command.
+(`root:root`) and permissions (`0755`). Also creates the shared `bot` group
+that all agents will belong to as a supplementary group. Must be run once
+before any other command.
 
 #### `botadm create [--no-sudoers]`
 
@@ -172,11 +253,13 @@ Provisions a new bot namespace:
 
 1. Creates a dedicated system group and headless system user (shell:
    `/usr/sbin/nologin` on Linux, `/usr/bin/false` on macOS).
-2. Creates the agent's home directory (`0700`, permission-locked) and
+2. Adds the agent user to the shared supplementary group `bot` for
+   cross-agent project collaboration.
+3. Creates the agent's home directory (`0700`, permission-locked) and
    collaborative workspace (`2770` with SGID).
-3. Assigns workspace ownership to the invoking (sudo) user and the bot's
+4. Assigns workspace ownership to the invoking (sudo) user and the bot's
    group.
-4. By default, writes a validated sudoers drop-in to
+5. By default, writes a validated sudoers drop-in to
    `/etc/sudoers.d/bot-<name>`. Pass `--no-sudoers` to skip.
 
 On failure, all partially-created resources (group, user, directories) are

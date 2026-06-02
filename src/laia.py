@@ -124,6 +124,36 @@ def _remove_sudoers(bot):
         print(f"-> Sudoers rule removed: {sudoers_path}")
 
 
+def _ensure_bot_group():
+    """Create the shared 'bot' group if it doesn't already exist."""
+    import grp
+    try:
+        grp.getgrnam("bot")
+        return True
+    except KeyError:
+        pass
+    gid = _free_id("Groups", "PrimaryGroupID", min_id=440, max_id=449)
+    ok = _dscl_quiet("-create", "/Groups/bot") and \
+         _dscl_quiet("-create", "/Groups/bot", "PrimaryGroupID", str(gid)) and \
+         _dscl_quiet("-create", "/Groups/bot", "Password", "*")
+    if ok:
+        print(f"-> Shared group 'bot' created (GID {gid}).")
+    else:
+        print("Warning: could not create shared group 'bot'.", file=sys.stderr)
+    return ok
+
+
+def _add_to_bot_group(bot):
+    """Add an agent user to the shared 'bot' supplementary group."""
+    try:
+        _dscl("-merge", "/Groups/bot", "GroupMembership", bot)
+        print(f"-> User '{bot}' added to shared group 'bot'.")
+        return True
+    except subprocess.CalledProcessError as err:
+        print(f"Warning: could not add '{bot}' to 'bot' group: {err}", file=sys.stderr)
+        return False
+
+
 def cmdinit(args):
     """Initialize the master sandbox container directory at /var/bot."""
     checkroot()
@@ -132,6 +162,7 @@ def cmdinit(args):
     BOTROOT.mkdir(parents=True, exist_ok=True)
     os.chown(str(BOTROOT), 0, 0)
     BOTROOT.chmod(0o755)
+    _ensure_bot_group()
     print("Initialization complete.")
 
 
@@ -209,6 +240,10 @@ def cmdcreate(args):
         if group_created:
             _dscl_quiet("-delete", f"/Groups/{bot}")
         sys.exit(1)
+
+    # Add agent to the shared bot group (non-fatal if it fails)
+    _ensure_bot_group()
+    _add_to_bot_group(bot)
 
     sudoers_installed = False
     if not args.no_sudoers:
