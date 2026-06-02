@@ -168,3 +168,40 @@ All scenarios pass on macOS 15+:
   or unrelated system accounts.
 - **macOS first, Linux second.** When implementing features, do it in
   `src/laia.py` first; `src/laia_linux.py` can follow.
+
+---
+
+## Session 2: Porting `share` to Linux, `--dry-run`, and getcwd fix
+
+### What I Did
+
+1. **Ported `cmdshare` to `src/laia_linux.py`** (lines 285-375). Same logic as
+   the macOS version — chgrp to `bot`, SGID, recursive mode, path safety checks,
+   sensitive entry warnings, host-user-in-bot-group check. The only difference is
+   the group membership check uses `grp.getgrnam("bot").gr_mem` instead of `dscl`
+   since Linux uses shadow-utils.
+
+2. **Added `--dry-run` / `-n` flag** to the `share` subcommand on **both**
+   platforms. When set, it prints what would be done (`[DRY RUN] ...`) and exits
+   before any `chgrp`/`chmod` calls. Wired into the argparser and the handler
+   with early returns for both the main operation and the recursive walk.
+
+3. **Fixed the `getcwd` cosmetic warning** in Quick Start. The
+   `sudo -u clio sh -c '...'` commands from a non-traversable CWD print a
+   harmless shell-init warning. Wrapped them with `cd /tmp &&` to ensure the
+   target user can traverse the starting directory.
+
+3. **Fixed `system_roots` for Linux.** The initial port blindly copied the macOS
+   set (`/System`, `/Library`, `/Network`, `/home`) which don't exist on Linux.
+   Replaced with `/proc`, `/sys`, `/dev`, `/run`, `/root`.
+
+4. **Updated docs** in `LAIA.md`:
+   - Quick Start: `cd /tmp &&` prefix on agent `sudo -u` commands.
+   - `botadm share` description: mentions `--dry-run` / `-n`.
+   - `botadm share [--recursive] [--dry-run] <path>` signature.
+   - Bullet list: added `--dry-run` entry.
+   - Regenerated `LAIA.txt` via `scripts/md2txt.py`.
+
+### Open Threads (persisting)
+- **Network isolation** is still future work (unshare + nftables/iptables).
+- **No credential pinning** — the `.ssh/` decision stands.

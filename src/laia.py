@@ -368,30 +368,39 @@ def cmdshare(args):
         sys.exit(1)
 
     # Apply group and SGID
-    subprocess.run(["chgrp", "bot", str(path)], check=True)
-    subprocess.run(["chmod", "g+rwxs", str(path)], check=True)
-    print(f"-> '{path}' is now shared with all bots (group=bot, SGID).")
+    if args.dry_run:
+        print(f"[DRY RUN] Would set group=bot, SGID on '{path}'")
+    else:
+        subprocess.run(["chgrp", "bot", str(path)], check=True)
+        subprocess.run(["chmod", "g+rwxs", str(path)], check=True)
+        print(f"-> '{path}' is now shared with all bots (group=bot, SGID).")
 
     # Optionally fix existing files
     if args.recursive:
-        for root, dirs, files in os.walk(str(path)):
-            for name in files:
-                fp = os.path.join(root, name)
-                try:
-                    subprocess.run(["chgrp", "bot", fp], check=True, capture_output=True)
-                    subprocess.run(["chmod", "g+rw", fp], check=True, capture_output=True)
-                except subprocess.CalledProcessError:
-                    pass
-            for name in dirs:
-                dp = os.path.join(root, name)
-                try:
-                    subprocess.run(["chgrp", "bot", dp], check=True, capture_output=True)
-                    subprocess.run(["chmod", "g+rwxs", dp], check=True, capture_output=True)
-                except subprocess.CalledProcessError:
-                    pass
-        print("-> Existing files updated (recursive).")
-    else:
+        if args.dry_run:
+            print(f"[DRY RUN] Would recursively update files under '{path}'")
+        else:
+            for root, dirs, files in os.walk(str(path)):
+                for name in files:
+                    fp = os.path.join(root, name)
+                    try:
+                        subprocess.run(["chgrp", "bot", fp], check=True, capture_output=True)
+                        subprocess.run(["chmod", "g+rw", fp], check=True, capture_output=True)
+                    except subprocess.CalledProcessError:
+                        pass
+                for name in dirs:
+                    dp = os.path.join(root, name)
+                    try:
+                        subprocess.run(["chgrp", "bot", dp], check=True, capture_output=True)
+                        subprocess.run(["chmod", "g+rwxs", dp], check=True, capture_output=True)
+                    except subprocess.CalledProcessError:
+                        pass
+            print("-> Existing files updated (recursive).")
+    elif not args.dry_run:
         print("  (existing files not modified; use --recursive to update them)")
+
+    if args.dry_run:
+        return
 
     # Warn about sensitive files
     sensitive = {".git", ".env", ".aws", ".ssh", ".config", ".gnupg"}
@@ -489,6 +498,10 @@ def main():
     parser_share.add_argument(
         "--recursive", "-r", action="store_true",
         help="Recursively update existing files and directories.",
+    )
+    parser_share.add_argument(
+        "--dry-run", "-n", action="store_true",
+        help="Print what would be done without making changes.",
     )
 
     parser_run = subparsers.add_parser("run", help="Run a command securely inside a bot's sandbox.")

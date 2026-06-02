@@ -38,8 +38,8 @@ sudo python3 src/laia.py share ~/laia-test
 
 # 5. Have each party create a file
 echo "hello from human" > ~/laia-test/human.txt
-sudo -u clio   sh -c 'echo "hello from clio"  > ~/laia-test/clio.txt'
-sudo -u codex  sh -c 'echo "hello from codex" > ~/laia-test/codex.txt'
+cd /tmp && sudo -u clio   sh -c 'echo "hello from clio"  > ~/laia-test/clio.txt'
+cd /tmp && sudo -u codex  sh -c 'echo "hello from codex" > ~/laia-test/codex.txt'
 
 # 6. Verify everyone can read everything
 cat ~/laia-test/clio.txt
@@ -195,6 +195,7 @@ sudo python3 src/laia.py share ~/my-project
 This sets the group to `bot`, applies SGID (`g+rwxs`) so new files inherit the
 group, and warns about sensitive entries (`.git/`, `.env`, `.aws/`) that would
 become agent-readable. Use `--recursive` (`-r`) to also fix existing files.
+Pass `--dry-run` (`-n`) to preview changes without touching the filesystem.
 
 If you prefer to set it up manually:
 
@@ -386,7 +387,7 @@ Permanently removes a bot:
 
 **This operation is irreversible.**
 
-#### `botadm share [--recursive] <path>`
+#### `botadm share [--recursive] [--dry-run] <path>`
 
 Shares an existing directory with all agents:
 
@@ -395,6 +396,7 @@ Shares an existing directory with all agents:
 - Warns about sensitive entries (`.git/`, `.env`, `.aws/`, etc.) that would
   become agent-readable.
 - With `--recursive`, also updates existing files and subdirectories.
+- With `--dry-run`, prints what would be done without modifying the filesystem.
 
 The directory must not be a system path (`/etc`, `/usr`, `/var`, etc.).
 Requires `init` to have been run first.

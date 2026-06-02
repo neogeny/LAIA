@@ -282,6 +282,99 @@ def cmddestroy(args):
     print(f"Agent '{bot}' destroyed.")
 
 
+def cmdshare(args):
+    """Share a directory with all bots via the shared 'bot' group."""
+    checkroot()
+
+    import grp
+    try:
+        grp.getgrnam("bot")
+    except KeyError:
+        print(
+            "Error: Shared group 'bot' does not exist. Run 'init' first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    path = Path(args.path).resolve()
+
+    if not path.is_dir():
+        print(f"Error: '{path}' is not a directory.", file=sys.stderr)
+        sys.exit(1)
+
+    # Refuse system paths
+    system_roots = {"/etc", "/usr", "/var", "/bin", "/sbin",
+                    "/opt", "/proc", "/sys", "/dev", "/run", "/root"}
+    if str(path) in system_roots:
+        print(f"Error: Refusing to share system root '{path}'.", file=sys.stderr)
+        sys.exit(1)
+
+    for parent in path.parents:
+        if str(parent) in system_roots:
+            print(f"Error: Refusing to share '{path}' under system path '{parent}'.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    if str(path) == str(BOTROOT):
+        print(f"Error: Refusing to share bot root '{BOTROOT}'. "
+              "Share individual agent workdirs instead.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.dry_run:
+        print(f"[DRY RUN] Would set group=bot, SGID on '{path}'")
+    else:
+        subprocess.run(["chgrp", "bot", str(path)], check=True)
+        subprocess.run(["chmod", "g+rwxs", str(path)], check=True)
+        print(f"-> '{path}' is now shared with all bots (group=bot, SGID).")
+
+    # Optionally fix existing files
+    if args.recursive:
+        if args.dry_run:
+            print(f"[DRY RUN] Would recursively update files under '{path}'")
+        else:
+            for root, dirs, files in os.walk(str(path)):
+                for name in files:
+                    fp = os.path.join(root, name)
+                    try:
+                        subprocess.run(["chgrp", "bot", fp], check=True, capture_output=True)
+                        subprocess.run(["chmod", "g+rw", fp], check=True, capture_output=True)
+                    except subprocess.CalledProcessError:
+                        pass
+                for name in dirs:
+                    dp = os.path.join(root, name)
+                    try:
+                        subprocess.run(["chgrp", "bot", dp], check=True, capture_output=True)
+                        subprocess.run(["chmod", "g+rwxs", dp], check=True, capture_output=True)
+                    except subprocess.CalledProcessError:
+                        pass
+            print("-> Existing files updated (recursive).")
+    elif not args.dry_run:
+        print("  (existing files not modified; use --recursive to update them)")
+
+    if args.dry_run:
+        return
+
+    # Warn about sensitive files
+    sensitive = {".git", ".env", ".aws", ".ssh", ".config", ".gnupg"}
+    found = []
+    for entry in path.iterdir():
+        if entry.name in sensitive:
+            found.append(entry.name)
+    if found:
+        print(f"  Warning: sensitive entries found: {', '.join(found)}")
+        print("  Agents in the 'bot' group will be able to read these.")
+
+    # Check if human is in bot group
+    realuser = getuser()
+    try:
+        botgrp = grp.getgrnam("bot")
+        if realuser not in botgrp.gr_mem:
+            print(f"\n  Note: add yourself to the 'bot' group to access agent files:")
+            print(f"    sudo usermod -aG bot {realuser}")
+    except KeyError:
+        pass
+
+
 def cmdrun(args):
     """Wipe environment and execute a command inside the bot's sandbox."""
     bot = args.bot
@@ -347,6 +440,19 @@ def main():
         help="Skip removing the sudoers drop-in rule.",
     )
 
+    parser_share = subparsers.add_parser(
+        "share", help="Share a directory with all bots via the shared 'bot' group."
+    )
+    parser_share.add_argument("path", help="Directory path to share.")
+    parser_share.add_argument(
+        "--recursive", "-r", action="store_true",
+        help="Recursively update existing files and directories.",
+    )
+    parser_share.add_argument(
+        "--dry-run", "-n", action="store_true",
+        help="Print what would be done without making changes.",
+    )
+
     parser_run = subparsers.add_parser("run", help="Run a command securely inside a bot's sandbox.")
     parser_run.add_argument("bot", help="Name of the bot container to execute in.")
     parser_run.add_argument("command", nargs=argparse.REMAINDER, help="Command and arguments to run.")
@@ -358,6 +464,7 @@ def main():
         "create": cmdcreate,
         "disable": cmddisable,
         "destroy": cmddestroy,
+        "share": cmdshare,
         "run": cmdrun,
     }
 
