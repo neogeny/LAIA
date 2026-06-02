@@ -32,10 +32,9 @@ sudo dseditgroup -o edit -a $USER -t user bot
 # Linux
 # sudo usermod -aG bot $USER
 
-# 4. Create a shared project directory
+# 4. Share your project directory with all agents
 mkdir -p ~/laia-test
-sudo chgrp -R bot ~/laia-test
-sudo chmod -R g+rwX ~/laia-test
+sudo python3 src/laia.py share ~/laia-test
 
 # 5. Have each party create a file
 echo "hello from human" > ~/laia-test/human.txt
@@ -185,6 +184,25 @@ sudo usermod -aG bot $USER
 sudo dseditgroup -o edit -a $USER -t user bot
 ```
 
+### Sharing a project with bots: `botadm share`
+
+To share an existing directory with all agents, use the `share` command:
+
+```bash
+sudo python3 src/laia.py share ~/my-project
+```
+
+This sets the group to `bot`, applies SGID (`g+rwxs`) so new files inherit the
+group, and warns about sensitive entries (`.git/`, `.env`, `.aws/`) that would
+become agent-readable. Use `--recursive` (`-r`) to also fix existing files.
+
+If you prefer to set it up manually:
+
+```bash
+sudo chgrp bot ~/my-project
+sudo chmod g+rwxs ~/my-project
+```
+
 For an agent's `work/` directory, you have two choices:
 
 - **Join the agent's group** — gives you direct read/write access to
@@ -313,9 +331,9 @@ the project:
 | `src/laia.py` | macOS | `dscl` (Directory Service command line) |
 | `src/laia_linux.py` | Linux | `groupadd`, `useradd`, `groupdel`, `userdel` |
 
-Both expose the same interface (`init`, `create`, `disable`, `destroy`, `run`)
-and share the same architectural principles. Only the system-level CRUD
-operations differ.
+Both expose the same interface (`init`, `create`, `disable`, `destroy`,
+`share`, `run`) and share the same architectural principles. Only the
+system-level CRUD operations differ.
 
 ### System Configuration Lifecycle
 
@@ -367,6 +385,19 @@ Permanently removes a bot:
 - Deletes the entire namespace tree under `/var/bot/<name>`.
 
 **This operation is irreversible.**
+
+#### `botadm share [--recursive] <path>`
+
+Shares an existing directory with all agents:
+
+- Sets group ownership to `bot`.
+- Applies SGID (`g+rwxs`) so new files inherit the `bot` group.
+- Warns about sensitive entries (`.git/`, `.env`, `.aws/`, etc.) that would
+  become agent-readable.
+- With `--recursive`, also updates existing files and subdirectories.
+
+The directory must not be a system path (`/etc`, `/usr`, `/var`, etc.).
+Requires `init` to have been run first.
 
 ### Sandboxed Execution Context
 
