@@ -199,8 +199,11 @@ def cmdcreate(args):
     bot = args.bot
 
     if not BOTROOT.exists():
-        print(f"Error: {BOTROOT} is not initialized. Run 'botadm init' first.", file=sys.stderr)
-        sys.exit(1)
+        if getattr(args, 'dry_run', False):
+            print(f"[DRY RUN] {BOTROOT} is not initialized. 'init' would be required.")
+        else:
+            print(f"Error: {BOTROOT} is not initialized. Run 'botadm init' first.", file=sys.stderr)
+            sys.exit(1)
 
     botdir = BOTROOT / bot
 
