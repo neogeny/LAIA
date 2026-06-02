@@ -171,6 +171,64 @@ def _add_to_bot_group(bot):
         return False
 
 
+def _is_agent_user(name):
+    """Return True if the given username is an agent account.
+
+    Heuristics:
+    - passwd GECOS (pw_gecos) starts with 'Agent:'
+    - or the user's home directory is under BOTROOT
+    """
+    try:
+        import pwd
+        p = pwd.getpwnam(name)
+        gecos = (p.pw_gecos or "").strip()
+        home = p.pw_dir or ""
+        if gecos.startswith("Agent:"):
+            return True
+        if str(Path(home)).startswith(str(BOTROOT)):
+            return True
+    except KeyError:
+        return False
+    except Exception:
+        return False
+    return False
+
+
+def _is_bot_group(name):
+    """Return True if the named group appears related to bot accounts.
+
+    Criteria:
+    - group name 'bot' is always bot-related
+    - group has at least one member whose home is under BOTROOT or whose GECOS starts with 'Agent:'
+    - or a user with the same name exists and is an agent
+    """
+    if name == "bot":
+        return True
+    try:
+        import grp
+        g = grp.getgrnam(name)
+        # direct user with same name
+        if _is_agent_user(name):
+            return True
+        for member in g.gr_mem:
+            if _is_agent_user(member):
+                return True
+    except KeyError:
+        return False
+    except Exception:
+        return False
+    return False
+
+    """Add an agent user to the shared 'bot' supplementary group."""
+    try:
+        _dscl("-merge", "/Groups/bot", "GroupMembership", bot)
+        print(f"-> User '{bot}' added to shared group 'bot'.")
+        return True
+    except subprocess.CalledProcessError as err:
+        print(f"Warning: could not add '{bot}' to 'bot' group: {err}", file=sys.stderr)
+        return False
+
+
 def cmdinit(args):
     """Initialize the master sandbox container directory at /var/bot."""
     checkroot()
@@ -192,6 +250,12 @@ def cmdcreate(args):
     if not BOTROOT.exists():
         print(f"Error: {BOTROOT} is not initialized. Run 'botadm init' first.", file=sys.stderr)
         sys.exit(1)
+
+    # If the system user already exists, ensure it is an agent account
+    if _dscl_quiet("-read", f"/Users/{bot}"):
+        if not _is_agent_user(bot):
+            print(f"Error: system user '{bot}' exists but is not an agent account.", file=sys.stderr)
+            sys.exit(1)
 
     botdir = BOTROOT / bot
 
@@ -606,6 +670,13 @@ def cmdshare(args):
         print(f"Error: Group '{group}' does not exist. Use --create to create it.", file=sys.stderr)
         sys.exit(1)
 
+    # Validate that the group is bot-related
+    if not _is_bot_group(group):
+        # Allow creation case: if --create was used we accept the new group as bot-related
+        if not args.create:
+            print(f"Error: Group '{group}' does not appear to be bot-related.", file=sys.stderr)
+            sys.exit(1)
+
     # validate targets
     system_roots = {"/etc", "/usr", "/var", "/System", "/bin", "/sbin",
                     "/opt", "/Library", "/Network", "/home"}
@@ -636,6 +707,15 @@ def cmdshare(args):
 
     # set exact membership when --bots provided
     if bots:
+        # Verify each provided bot is an agent account
+        for m in bots:
+            if not _dscl_quiet("-read", f"/Users/{m}"):
+                print(f"Error: specified bot '{m}' does not exist.", file=sys.stderr)
+                sys.exit(1)
+            if not _is_agent_user(m):
+                print(f"Error: specified bot '{m}' exists but is not recognized as an agent account.", file=sys.stderr)
+                sys.exit(1)
+
         if args.dry_run:
             print(f"[DRY RUN] Would set group '{group}' membership to: {', '.join(bots)}")
         else:
@@ -677,6 +757,56 @@ def cmdshare(args):
 
 
 def cmdnoshare(args):
+    """Restore group ownership to invoking user's primary group and delete the named group (macOS)."""
+    checkroot()
+    _check_platform()
+    import grp
+    import pwd
+
+    group = args.group or "bot"
+    if getattr(args, 'path', None):
+        targets = [Path(p).resolve() for p in args.path.split(",") if p.strip()]
+    else:
+        targets = [Path.cwd()]
+
+    try:
+        grp.getgrnam(group)
+    except KeyError:
+        print(f"Error: Group '{group}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+
+    # Verify group is bot-related
+    if not _is_bot_group(group):
+        print(f"Error: Group '{group}' does not appear to be bot-related.", file=sys.stderr)
+        sys.exit(1)
+
+    # confirmation
+    if not args.force and not args.dry_run:
+        print(f"About to remove sharing for group='{group}' on: {', '.join(map(str, targets))}")
+        ok = input("Proceed? [y/N]: ").strip().lower()
+        if ok != "y":
+            print("Aborting.")
+            sys.exit(1)
+
+    mygid = pwd.getpwuid(os.getuid()).pw_gid
+    mygroup = grp.getgrgid(mygid).gr_name
+    for path in targets:
+        if args.dry_run:
+            print(f"[DRY RUN] Would restore group of '{path}' to '{mygroup}'")
+        else:
+            subprocess.run(["chgrp", mygroup, str(path)], check=True)
+            print(f"-> Restored group of '{path}' to '{mygroup}'.")
+
+    if args.dry_run:
+        print(f"[DRY RUN] Would delete group '{group}'")
+        return
+
+    if _dscl_quiet("-delete", f"/Groups/{group}"):
+        print(f"-> Group '{group}' deleted.")
+    else:
+        print(f"Error: failed to delete group '{group}'", file=sys.stderr)
+        sys.exit(1)
+
     """Restore group ownership to invoking user's primary group and delete the named group (macOS)."""
     checkroot()
     _check_platform()

@@ -129,6 +129,55 @@ def _add_to_bot_group(bot):
         print(f"Warning: could not add '{bot}' to 'bot' group: {err.stderr.decode().strip()}", file=sys.stderr)
 
 
+def _is_agent_user(name):
+    """Return True if the given username is an agent account on Linux.
+
+    Heuristics:
+    - GECOS (pw_gecos) begins with 'Agent:'
+    - or the user's home directory is under BOTROOT
+    """
+    try:
+        import pwd
+        p = pwd.getpwnam(name)
+        gecos = (p.pw_gecos or "").strip()
+        home = p.pw_dir or ""
+        if gecos.startswith("Agent:"):
+            return True
+        if str(Path(home)).startswith(str(BOTROOT)):
+            return True
+    except KeyError:
+        return False
+    except Exception:
+        return False
+    return False
+
+
+def _is_bot_group(name):
+    """Return True if the named group appears related to bot accounts.
+
+    Criteria:
+    - group name 'bot' is always bot-related
+    - group has at least one member whose home is under BOTROOT or whose GECOS starts with 'Agent:'
+    - or a user with the same name exists and is an agent
+    """
+    if name == "bot":
+        return True
+    try:
+        import grp
+        g = grp.getgrnam(name)
+        # direct user with same name
+        if _is_agent_user(name):
+            return True
+        for member in g.gr_mem:
+            if _is_agent_user(member):
+                return True
+    except KeyError:
+        return False
+    except Exception:
+        return False
+    return False
+
+
 def cmdinit(args):
     """Initialize the master sandbox container directory at /var/bot."""
     checkroot()
@@ -167,6 +216,29 @@ def cmdcreate(args):
 
     # Determine invoking user and their PATH
     realuser = getuser()
+
+    # If the system user already exists, ensure it is an agent account
+    try:
+        import pwd
+        pwd.getpwnam(bot)
+        user_exists = True
+    except KeyError:
+        user_exists = False
+    if user_exists:
+        if not _is_agent_user(bot):
+            print(f"Error: system user '{bot}' exists but is not an agent account.", file=sys.stderr)
+            sys.exit(1)
+
+    # If the group exists, ensure it appears bot-related
+    try:
+        import grp
+        grp.getgrnam(bot)
+        group_exists = True
+    except KeyError:
+        group_exists = False
+    if group_exists and not _is_bot_group(bot):
+        print(f"Error: group '{bot}' exists but does not appear to be bot-related.", file=sys.stderr)
+        sys.exit(1)
     try:
         real_path = subprocess.run(
             ["sudo", "-u", realuser, "printenv", "PATH"],
@@ -194,21 +266,37 @@ def cmdcreate(args):
         print("Proceeding without prompting (force).")
 
     try:
-        subprocess.run(["groupadd", bot], check=True, capture_output=True)
-        group_created = True
+        # Create group only if it does not already exist
+        import grp
+        try:
+            grp.getgrnam(bot)
+            print(f"-> Group '{bot}' already exists; reusing it.")
+            group_created = False
+        except KeyError:
+            subprocess.run(["groupadd", bot], check=True, capture_output=True)
+            group_created = True
+            print(f"-> Group '{bot}' created.")
 
-        subprocess.run(
-            ["useradd", "--system", "--gid", bot,
-             "--home-dir", str(botdir), "--shell", "/bin/bash", bot],
-            check=True, capture_output=True,
-        )
-        user_created = True
+        # Create user only if it does not already exist
+        import pwd
+        try:
+            pwd.getpwnam(bot)
+            print(f"-> User '{bot}' already exists; reusing it.")
+            user_created = False
+        except KeyError:
+            subprocess.run([
+                "useradd", "--system",
+                "--gid", bot,
+                "--home-dir", str(botdir),
+                "--shell", "/bin/bash",
+                bot
+            ], check=True, capture_output=True)
+            user_created = True
+            print(f"-> User '{bot}' created.")
 
         botdir.mkdir(parents=True, exist_ok=True)
         dirs_created = True
 
-        import pwd
-        import grp
         try:
             botuid = pwd.getpwnam(bot).pw_uid
             botgid = grp.getgrnam(bot).gr_gid
@@ -249,9 +337,15 @@ def cmdcreate(args):
         if dirs_created:
             shutil.rmtree(botdir, ignore_errors=True)
         if user_created:
-            subprocess.run(["userdel", "-r", bot], capture_output=True)
+            try:
+                subprocess.run(["userdel", "-r", bot], check=True, capture_output=True)
+            except Exception:
+                pass
         if group_created:
-            subprocess.run(["groupdel", bot], capture_output=True)
+            try:
+                subprocess.run(["groupdel", bot], check=True, capture_output=True)
+            except Exception:
+                pass
         sys.exit(1)
 
     # Add agent to the shared bot group (non-fatal if it fails)
@@ -434,7 +528,19 @@ def cmddestroy(args):
     bot = args.bot
 
     print(f"Destroying agent: {bot}")
-    print("This is permanent and will delete the system user, group, and namespace directory.")
+    print("This will remove the namespace directory and sudoers rule. The system user and group will be preserved.")
+
+    # If the system user exists, ensure it is an agent account
+    try:
+        import pwd
+        pwd.getpwnam(bot)
+        user_exists = True
+    except KeyError:
+        user_exists = False
+    if user_exists and not _is_agent_user(bot):
+        print(f"Error: system user '{bot}' exists but is not an agent account.", file=sys.stderr)
+        return
+
     if not getattr(args, 'force', False):
         print("Type the agent name to confirm: ", end="")
         try:
@@ -460,7 +566,7 @@ def cmddestroy(args):
     else:
         print(f"-> Directory {botdir} did not exist.")
 
-    print(f"Agent '{bot}' destroyed.")
+    print(f"Agent '{bot}' destroyed (namespace and sudoers cleaned; user/group preserved).")
 
 
 def cmdshare(args):
@@ -514,6 +620,12 @@ def cmdshare(args):
         print(f"Error: Group '{group}' does not exist. Use --create to create it.", file=sys.stderr)
         sys.exit(1)
 
+    # Validate that the group is bot-related
+    if not _is_bot_group(group):
+        if not args.create:
+            print(f"Error: Group '{group}' does not appear to be bot-related.", file=sys.stderr)
+            sys.exit(1)
+
     # Validate targets
     system_roots = {"/etc", "/usr", "/var", "/bin", "/sbin",
                     "/opt", "/proc", "/sys", "/dev", "/run", "/root"}
@@ -544,6 +656,18 @@ def cmdshare(args):
 
     # If --bots provided, set exact membership using gpasswd -M
     if bots:
+        # Verify each provided bot is an agent account
+        for m in bots:
+            try:
+                import pwd
+                pwd.getpwnam(m)
+            except KeyError:
+                print(f"Error: specified bot '{m}' does not exist.", file=sys.stderr)
+                sys.exit(1)
+            if not _is_agent_user(m):
+                print(f"Error: specified bot '{m}' exists but is not recognized as an agent account.", file=sys.stderr)
+                sys.exit(1)
+
         members_csv = ",".join(bots)
         if args.dry_run:
             print(f"[DRY RUN] Would set group '{group}' membership to: {members_csv}")
