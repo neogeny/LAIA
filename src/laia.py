@@ -293,6 +293,26 @@ def cmdcreate(args):
         print("Proceeding without prompting (force).")
 
     try:
+        # Support dry-run to preview creation steps without making changes
+        if getattr(args, 'dry_run', False):
+            print("[DRY RUN] Would perform the following actions:")
+            if not group_exists:
+                print(f"  - Create group '{bot}' (GID: auto-assigned)")
+            else:
+                print(f"  - Reuse existing group '{bot}'")
+            if not user_exists:
+                print(f"  - Create user '{bot}' (UID: auto-assigned)")
+            else:
+                print(f"  - Reuse existing user '{bot}'")
+            print(f"  - Create namespace directory: {botdir}")
+            print("  - Set ownership: owner=<invoking user>, group=<bot>")
+            print("  - Set directory mode: 2770 (SGID)")
+            print("  - Write env and dotfiles under the namespace")
+            if not args.no_sudoers:
+                print(f"  - Install sudoers drop-in for '{bot}' (visudo-validated)")
+            print("Dry-run: no changes will be made.")
+            return
+
         # Create group only if it does not already exist
         if not group_exists:
             gid = _free_id("Groups", "PrimaryGroupID")

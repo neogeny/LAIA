@@ -48,3 +48,12 @@ Where to find help
 - Contact the repo owner for authorization when system prompts (macOS dscl) block operations.
 
 This file is intended to be machine- and human-readable: keep it concise and stable. Update only with human approval.
+
+Agent account detection heuristic
+- Agent accounts are recognized by:
+  - GECOS/RealName starting with "Agent:" OR
+  - Home directory under /var/bot (the canonical namespace root)
+- Tools enforce this check: create will reuse existing system accounts only if they appear to be agent accounts; destroy, share, and noshare validate targets accordingly.
+
+Testing
+- A simple smoke script is available at scripts/test_agent_checks.sh to run dry-runs for create/destroy/share/noshare and verify outputs.

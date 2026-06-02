@@ -865,6 +865,11 @@ def main():
         "--force", "-f", action="store_true",
         help="Skip interactive prompts (force).",
     )
+    parser_create.add_argument(
+        "--dry-run", "-n", action="store_true",
+        help="Show actions without making changes.",
+    )
+
 
     parser_update = subparsers.add_parser("update", help="Recreate configuration for an existing bot namespace.")
     parser_update.add_argument("bot", help="Short name of the bot to update configuration for.")
