@@ -418,6 +418,46 @@ Executes a command inside the bot's sandbox:
 
 ---
 
+## Quick Start
+
+These steps take you from zero to two collaborating agents in under a minute.
+
+```bash
+# 1. Initialize the sandbox root
+sudo python3 src/laia.py init
+
+# 2. Create two agents
+sudo python3 src/laia.py create clio
+sudo python3 src/laia.py create codex
+
+# 3. Add yourself to the shared bot group
+# macOS
+sudo dseditgroup -o edit -a $USER -t user bot
+# Linux
+# sudo usermod -aG bot $USER
+
+# 4. Share your project directory with all agents
+mkdir -p ~/laia-test
+sudo python3 src/laia.py share ~/laia-test
+
+# 5. Have each party create a file
+echo "hello from human" > ~/laia-test/human.txt
+cd /tmp && sudo -u clio   sh -c 'echo "hello from clio"  > ~/laia-test/clio.txt'
+cd /tmp && sudo -u codex  sh -c 'echo "hello from codex" > ~/laia-test/codex.txt'
+
+# 6. Verify everyone can read everything
+cat ~/laia-test/clio.txt
+cat ~/laia-test/codex.txt
+
+# 7. Verify cross-agent isolation (clio cannot access codex's workdir)
+sudo -u clio ls /var/bot/codex/work
+# should print: ls: .: Operation not permitted
+
+# 8. Run a command inside clio's sandbox
+python3 src/laia.py run clio whoami   # prints: clio
+```
+
+
 ## 5. Design Decisions
 
 **Per-Bot Sudoers Drop-Ins**  
