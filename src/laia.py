@@ -219,15 +219,6 @@ def _is_bot_group(name):
         return False
     return False
 
-    """Add an agent user to the shared 'bot' supplementary group."""
-    try:
-        _dscl("-merge", "/Groups/bot", "GroupMembership", bot)
-        print(f"-> User '{bot}' added to shared group 'bot'.")
-        return True
-    except subprocess.CalledProcessError as err:
-        print(f"Warning: could not add '{bot}' to 'bot' group: {err}", file=sys.stderr)
-        return False
-
 
 def cmdinit(args):
     """Initialize the master sandbox container directory at /var/bot."""
