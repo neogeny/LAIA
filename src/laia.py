@@ -210,14 +210,17 @@ def cmdcreate(args):
     print(f"  Namespace directory: {botdir}")
     print("  User shell: /bin/zsh")
     print(f"  Inherited PATH: {real_path or '(empty)'}")
-    print("\nProceed with creation? [y/N]: ", end="")
-    try:
-        ans = input().strip().lower()
-    except EOFError:
-        ans = "n"
-    if ans not in ("y", "yes"):
-        print("Aborted by user.")
-        sys.exit(1)
+    if not getattr(args, "force", False):
+        print("\nProceed with creation? [y/N]: ", end="")
+        try:
+            ans = input().strip().lower()
+        except EOFError:
+            ans = "n"
+        if ans not in ("y", "yes"):
+            print("Aborted by user.")
+            sys.exit(1)
+    else:
+        print("Proceeding without prompting (force).")
 
     try:
         gid = _free_id("Groups", "PrimaryGroupID")
@@ -270,7 +273,11 @@ def cmdcreate(args):
         os.chown(str(zprofile), botuid, botgid)
 
         zshrc = botdir / ".zshrc"
-        zshrc.write_text('[[ -f /etc/zshrc ]] && source /etc/zshrc\n')
+        zshrc_contents = '[[ -f /etc/zshrc ]] && source /etc/zshrc\n'
+        zshrc_contents += "PROMPT='%F{green}%n@%m%f:%F{blue}%~%f$ '\n"
+        zshrc_contents += "# Fallback for programs expecting PS1\n"
+        zshrc_contents += "export PS1=\"$(print -P '%F{green}%n@%m%f:%F{blue}%~%f$ ')\"\n"
+        zshrc.write_text(zshrc_contents)
         zshrc.chmod(0o644)
         os.chown(str(zshrc), botuid, botgid)
 
@@ -356,7 +363,11 @@ def cmdupdate(args):
     os.chown(str(zprofile), botuid, botgid)
 
     zshrc = botdir / ".zshrc"
-    zshrc.write_text('[[ -f /etc/zshrc ]] && source /etc/zshrc\n')
+    zshrc_contents = '[[ -f /etc/zshrc ]] && source /etc/zshrc\n'
+    zshrc_contents += "PROMPT='%F{green}%n@%m%f:%F{blue}%~%f$ '\n"
+    zshrc_contents += "# Fallback for programs expecting PS1\n"
+    zshrc_contents += "export PS1=\"$(print -P '%F{green}%n@%m%f:%F{blue}%~%f$ ')\"\n"
+    zshrc.write_text(zshrc_contents)
     zshrc.chmod(0o644)
     os.chown(str(zshrc), botuid, botgid)
 
@@ -389,6 +400,60 @@ def cmddisable(args):
     print(f"Agent '{bot}' quarantined.")
 
 
+def cmdenable(args):
+    """Re-enable an agent previously disabled (macOS)."""
+    checkroot()
+    bot = args.bot
+    print(f"Enabling agent: {bot}")
+
+    # Ensure system user exists
+    if not _dscl_quiet("-read", f"/Users/{bot}"):
+        print(f"Error: System user '{bot}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    # Restore shell to zsh where possible
+    try:
+        try:
+            _dscl("-create", f"/Users/{bot}", "UserShell", "/bin/zsh")
+        except subprocess.CalledProcessError:
+            try:
+                _dscl("-change", f"/Users/{bot}", "UserShell", "/usr/bin/false", "/bin/zsh")
+            except subprocess.CalledProcessError:
+                # best-effort; continue
+                pass
+    except Exception:
+        pass
+
+    botdir = BOTROOT / bot
+    if botdir.exists():
+        import pwd
+        import grp
+        try:
+            botgid = grp.getgrnam(bot).gr_gid
+            realuser = getuser()
+            realuid = pwd.getpwnam(realuser).pw_uid
+        except KeyError as err:
+            print(f"Warning: system lookup failed: {err}", file=sys.stderr)
+            realuid = 0
+            botgid = 0
+        try:
+            os.chown(str(botdir), realuid, botgid)
+            for entry in botdir.iterdir():
+                try:
+                    if entry.is_dir():
+                        entry.chmod(0o2770)
+                    else:
+                        entry.chmod(0o660)
+                except Exception:
+                    pass
+            botdir.chmod(0o2770)
+            print("-> Filesystem permissions restored (best-effort).")
+        except Exception as err:
+            print(f"Warning: could not restore permissions: {err}", file=sys.stderr)
+
+    print(f"Agent '{bot}' enabled.")
+
+
 def cmddestroy(args):
     """Completely remove an agent on macOS: user, group, directory, sudoers."""
     checkroot()
@@ -396,6 +461,18 @@ def cmddestroy(args):
     bot = args.bot
 
     print(f"Destroying agent: {bot}")
+    print("This is permanent and will delete the system user, group, and namespace directory.")
+    if not getattr(args, 'force', False):
+        print("Type the agent name to confirm: ", end="")
+        try:
+            ans = input().strip()
+        except EOFError:
+            ans = ""
+        if ans != bot:
+            print("Aborted.")
+            return
+    else:
+        print("Force: skipping confirmation.")
 
     if not args.no_sudoers:
         _remove_sudoers(bot)
@@ -563,7 +640,7 @@ def cmdrun(args):
         f"PATH={_stored_path}",
         "TERM=xterm-256color",
         f"PWD={botwork}",
-        "PS1=\\[\\033[1;32m\\]\\u@bot\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
+        "PS1=\\[\\033[1;32m\\]\\u@{bot}\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
     ]
 
     sudocmd = [
@@ -616,7 +693,7 @@ def cmdshell(args):
         f"PATH={_stored_path}",
         "TERM=xterm-256color",
         f"PWD={botwork}",
-        "PS1=\\[\\033[1;32m\\]\\u@bot\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
+        "PS1=\\[\\033[1;32m\\]\\u@{bot}\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
     ]
 
     sudocmd = [
@@ -647,9 +724,16 @@ def main():
         "--no-sudoers", action="store_true",
         help="Skip automatic sudoers drop-in configuration.",
     )
+    parser_create.add_argument(
+        "--force", "-f", action="store_true",
+        help="Skip interactive prompts (force).",
+    )
 
     parser_update = subparsers.add_parser("update", help="Recreate configuration for an existing bot namespace.")
     parser_update.add_argument("bot", help="Short name of the bot to update configuration for.")
+
+    parser_enable = subparsers.add_parser("enable", help="Re-enable a previously disabled bot namespace.")
+    parser_enable.add_argument("bot", help="Short name of the bot to enable.")
 
     parser_disable = subparsers.add_parser("disable", help="Quarantine and lock an existing bot.")
     parser_disable.add_argument("bot", help="Short name of the bot to lock.")
@@ -661,6 +745,10 @@ def main():
     parser_destroy.add_argument(
         "--no-sudoers", action="store_true",
         help="Skip removing the sudoers drop-in rule.",
+    )
+    parser_destroy.add_argument(
+        "--force", "-f", action="store_true",
+        help="Skip interactive prompts (force).",
     )
 
     parser_share = subparsers.add_parser(
@@ -695,6 +783,7 @@ def main():
         "init": cmdinit,
         "create": cmdcreate,
         "update": cmdupdate,
+        "enable": cmdenable,
         "disable": cmddisable,
         "destroy": cmddestroy,
         "share": cmdshare,
