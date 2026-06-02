@@ -215,6 +215,10 @@ def cmdcreate(args):
         _laia_env = botdir / "env"
         _laia_env.write_text("\n".join(f"{k}={v}" for k, v in env_dict.items()) + "\n")
         _laia_env.chmod(0o640)
+        try:
+            os.chown(str(_laia_env), botuid, botgid)
+        except Exception:
+            pass
 
         # Create standard bash config files owned by the bot user
         profile = botdir / ".profile"
@@ -305,6 +309,10 @@ def cmdupdate(args):
     _laia_env = botdir / "env"
     _laia_env.write_text("\n".join(f"{k}={v}" for k, v in env_dict.items()) + "\n")
     _laia_env.chmod(0o640)
+    try:
+        os.chown(str(_laia_env), botuid, botgid)
+    except Exception:
+        pass
 
     # Recreate bash configuration files owned by the bot user
     profile = botdir / ".profile"
@@ -607,6 +615,57 @@ def cmdrun(args):
         sys.exit(130)
 
 
+def cmdshell(args):
+    """Launch an interactive shell inside the bot's sandbox (Linux)."""
+    bot = args.bot
+    shell = args.shell
+
+    botroot = BOTROOT / bot
+    bothome = botroot
+    botwork = botroot
+
+    if not botroot.is_dir():
+        print(f"Error: Sandbox '{botroot}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+
+    _laia_env = botroot / "env"
+    if _laia_env.exists():
+        content = _laia_env.read_text()
+        env_from_file = {}
+        for line in content.splitlines():
+            if '=' in line:
+                k, v = line.split('=', 1)
+                env_from_file[k] = v
+        _stored_path = env_from_file.get("PATH", "").strip()
+        if not _stored_path:
+            _stored_path = "/usr/local/bin:/usr/bin:/bin"
+    else:
+        _stored_path = "/usr/local/bin:/usr/bin:/bin"
+
+    envargs = [
+        f"HOME={bothome}",
+        f"USER={bot}",
+        f"LOGNAME={bot}",
+        f"PATH={_stored_path}",
+        "TERM=xterm-256color",
+        f"PWD={botwork}",
+        f"PS1=\\[\\e[1;32m\\]\\u@{bot}\\[\\e[0m\\]:\\[\\e[1;34m\\]\\w\\[\\e[0m\\]\\$ ",
+    ]
+
+    sudocmd = [
+        "sudo", "-u", bot,
+        "env", "-i", *envargs,
+        shell, "-c", f"cd '{botwork}' && exec {shell} -l -i",
+    ]
+
+    try:
+        subprocess.run(sudocmd, check=True)
+    except subprocess.CalledProcessError as err:
+        sys.exit(err.returncode)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Unified local agent sandbox administration and runtime container tool."
@@ -659,6 +718,15 @@ def main():
     parser_share.add_argument(
         "--dry-run", "-n", action="store_true",
         help="Print what would be done without making changes.",
+    )
+
+    parser_shell = subparsers.add_parser(
+        "shell", help="Launch an interactive shell inside a bot's sandbox."
+    )
+    parser_shell.add_argument("bot", help="Name of the bot container to enter.")
+    parser_shell.add_argument(
+        "--shell", "-s", default="bash",
+        help="Shell to launch (default: bash).",
     )
 
     parser_run = subparsers.add_parser("run", help="Run a command securely inside a bot's sandbox.")

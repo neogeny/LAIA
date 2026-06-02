@@ -264,6 +264,10 @@ def cmdcreate(args):
         _laia_env = botdir / "env"
         _laia_env.write_text("\n".join(f"{k}={v}" for k, v in env_dict.items()) + "\n")
         _laia_env.chmod(0o640)
+        try:
+            os.chown(str(_laia_env), botuid, botgid)
+        except Exception:
+            pass
 
         # Create standard zsh config files owned by the bot user
         zprofile = botdir / ".zprofile"
@@ -354,6 +358,10 @@ def cmdupdate(args):
     _laia_env = botdir / "env"
     _laia_env.write_text("\n".join(f"{k}={v}" for k, v in env_dict.items()) + "\n")
     _laia_env.chmod(0o640)
+    try:
+        os.chown(str(_laia_env), botuid, botgid)
+    except Exception:
+        pass
 
     # Recreate zsh configuration files owned by the bot user
     zprofile = botdir / ".zprofile"
@@ -718,7 +726,7 @@ def cmdshell(args):
     sudocmd = [
         "sudo", "-u", bot,
         "env", "-i", *envargs,
-        shell, "-c", f"cd '{botwork}' && exec {shell} -i",
+        shell, "-c", f"cd '{botwork}' && exec {shell} -l -i",
     ]
 
     try:

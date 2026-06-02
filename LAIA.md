@@ -516,3 +516,36 @@ wrap `botadm run` with `unshare -n` and `iptables`/`nftables` rules, or use
 `botadm create` cleans up partial state on failure, but `botadm destroy` is
 intentionally irreversible — the namespace, user, group, and sudoers rule are
 all removed in one operation.
+
+## 7. Recent Implementation Notes
+
+The implementation in src/laia.py and src/laia_linux.py has been updated to
+reflect the following operational decisions and features:
+
+- Single-directory namespace: /var/bot/<name> is now the authoritative layout for both platforms.
+- AGENT_ENV dict provides defaults (HISTFILE, EDITOR) and is persisted to
+  /var/bot/<name>/env.
+- env file ownership: update now attempts to chown the env file to the agent
+  user (best-effort) so the agent can manage its live environment.
+- macOS default shell: zsh for agents; Linux: bash. The update subcommand
+  attempts to set the system user's login shell (best-effort) and emits a
+  warning if it cannot.
+- create/update now write standard user dotfiles (.zprofile/.zshrc on macOS,
+  .profile/.bashrc on Linux) including a colored prompt and a PS1 fallback for
+  programs that expect it.
+- The create and destroy commands support --force / -f to skip interactive
+  prompts.
+- The shell subcommand launches a login interactive shell (exec {shell} -l -i),
+  so HOME and login init files are applied correctly.
+
+Smoke-test checklist (recommended):
+
+1. sudo python3 src/laia.py create testbot
+2. sudo python3 src/laia.py update testbot
+3. sudo python3 src/laia.py shell testbot    # verify HOME, PROMPT, PS1
+4. sudo python3 src/laia.py disable testbot  # verify account locked and perms 0000
+5. sudo python3 src/laia.py enable testbot   # verify account unlocked and perms restored
+6. sudo python3 src/laia.py destroy testbot  # confirm deletion (use --force to skip confirmation)
+
+These changes are backward-compatible with the previous layout and preserve the
+security model described in this document.

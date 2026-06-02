@@ -205,3 +205,34 @@ All scenarios pass on macOS 15+:
 ### Open Threads (persisting)
 - **Network isolation** is still future work (unshare + nftables/iptables).
 - **No credential pinning** — the `.ssh/` decision stands.
+
+---
+
+## Session 3: Agent config overhaul and docs update
+
+Date: 2026-06-02
+
+Summary:
+
+- Implemented single-directory /var/bot/<name> layout and AGENT_ENV in both
+  src/laia.py and src/laia_linux.py.
+- Added --force flag to create and destroy; added update, enable, disable
+  flows; created colored prompts and PS1 fallback; made shell subcommand launch
+  login shells; added best-effort chown of env to bot user.
+- Updated LAIA.md with a 'Recent Implementation Notes' section and a
+  smoke-test checklist.
+- Ran 'update' for the 'oco' bot and inspected /var/bot/oco: .zshrc and
+  .zprofile present, env file present; UserShell is /bin/zsh. Permissions were
+  adjusted; env is owned by the bot user where possible.
+- Ensured cmdshell starts a login interactive shell so HOME is set for sessions.
+
+Notes:
+
+- All changes are best-effort and non-fatal on failure (warnings only).
+- Recommended smoke tests were added to LAIA.md.
+
+Open items:
+
+- Consider adding network isolation (unshare + nftables/iptables) in a
+  future session.
+
