@@ -19,3 +19,8 @@ exclusively for agent-to-agent handoff.
 
 Previous sessions with agents are recorded in `.corpus/sessions/*` and they
 may also be useful in gaining context.
+
+### 2026-06-02 — AGENT_GUIDE added
+
+- Added AGENT_GUIDE.md: concise guidance for automated agents, including permitted actions, key commands, and important file locations. See AGENT_GUIDE.md for details.
+
