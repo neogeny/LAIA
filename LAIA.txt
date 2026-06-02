@@ -2,222 +2,459 @@ Local Agent Isolation Architecture
 
 Multi-Agent Sandboxing via Headless UNIX Namespaces
 
-This document establishes a local isolation containment strategy designed to run
-autonomous agents inside strict, independent security boundaries. This approach
-leverages native UNIX user, group, and filesystem controls combined with a
-hardened, dynamic sudo configuration to bypass the bloat and security leakages
-of modern GUI user accounts.
+Platforms: macOS — laia.py (dscl). Linux — laia_linux.py (shadow-utils
+groupadd/useradd). The principles are identical; the implementations differ
+because user and group management APIs are OS-native and irreducibly platform-
+specific.
 
-Platform Requirements: Linux with shadow-utils (groupadd, useradd, visudo). Not
-compatible with macOS or BSD out of the box.
+This document describes a local isolation strategy designed to run autonomous
+agents inside strict, independent security boundaries. It leverages native UNIX
+user, group, and filesystem controls combined with a hardened, dynamic sudo
+configuration — bypassing the bloat and security leakages of per-GUI-account
+approaches.
+
+------------------------------------------------------------------------
+
+Quick Start
+
+These steps take you from zero to two collaborating agents in under a minute.
+
+    # 1. Initialize the sandbox root
+    sudo python3 src/laia.py init
+    
+    # 2. Create two agents
+    sudo python3 src/laia.py create clio
+    sudo python3 src/laia.py create codex
+    
+    # 3. Add yourself to the shared bot group
+    # macOS
+    sudo dseditgroup -o edit -a $USER -t user bot
+    # Linux
+    # sudo usermod -aG bot $USER
+    
+    # 4. Create a shared project directory
+    mkdir -p ~/laia-test
+    sudo chgrp -R bot ~/laia-test
+    sudo chmod -R g+rwX ~/laia-test
+    
+    # 5. Have each party create a file
+    echo "hello from human" > ~/laia-test/human.txt
+    sudo -u clio   sh -c 'echo "hello from clio"  > ~/laia-test/clio.txt'
+    sudo -u codex  sh -c 'echo "hello from codex" > ~/laia-test/codex.txt'
+    
+    # 6. Verify everyone can read everything
+    cat ~/laia-test/clio.txt
+    cat ~/laia-test/codex.txt
+    
+    # 7. Verify cross-agent isolation (clio cannot access codex's workdir)
+    sudo -u clio ls /var/bot/codex/work
+    # should print: ls: .: Operation not permitted
+    
+    # 8. Run a command inside clio's sandbox
+    python3 src/laia.py run clio whoami   # prints: clio
+
+------------------------------------------------------------------------
 
 1. Threat Model & Sandboxing Realities
 
-When running autonomous agents locally, the goal is to defend against credential
-exfiltration, prompt-injection exploits, and runaway file operations without
-paying the high resource and complexity costs of heavy virtual machines or
-complex Docker setups.
+When running autonomous agents locally, the goal is to defend against each of
+the following without paying the resource and complexity cost of full virtual
+machines or Docker setups.
 
-Targeted Credential Theft: CLI tools invoked by agents (like git or pip) will
-automatically traverse up to your host user's home directory (~/) to resolve
-sensitive files such as ~/.ssh/id_rsa, ~/.aws/credentials, or local shell
-history files.
+Credential Theft. CLI tools invoked by agents (like git or pip) automatically
+traverse up to the host user's home directory (~/) to resolve sensitive files:
+~/.ssh/id_rsa, ~/.aws/credentials, shell history, and more. An agent running as
+the host user has unfettered access to all of them.
 
-Blast Radius Containment: If Agent A (e.g., an experimental web scraper) is
+Blast Radius Containment. If Agent A (e.g., an experimental web scraper) is
 compromised via indirect prompt injection, it must be cryptographically and
-permission-wise blocked from reading or writing to the workspace of Agent B
-(e.g., a codebase-refactoring agent).
+permission-wise blocked from reading or writing the workspace of Agent B (e.g.,
+a codebase-refactoring agent).
 
-Environment Variable Hygiene: When you run a process on your machine, it
-inherits your shell's environment variables. Secrets like production API keys or
-DB credentials must never leak into the execution context of untrusted agent
-loops.
+Environment Variable Hygiene. Every child process inherits the parent shell's
+environment. Production API keys, database credentials, and access tokens must
+never leak into untrusted agent execution contexts.
 
-2. The Architecture: Headless Namespaces
+Filesystem Boundary Enforcement. Without per-agent filesystem isolation, a
+single rogue agent can corrupt, ransom, or exfiltrate the entire project tree.
 
-Instead of heavy GUI accounts or shared agent pools, we define a lightweight,
-templated system layout under a single /var/bot root directory. Each agent gets
-its own User, Group, Home, and Workspace.
+Capability Reference
+The table below shows what an agent can and cannot do once sandboxed. These
+results are from live tests on a macOS system; the same principles apply on
+Linux.
 
-                       /var/bot/ (0755 root:root)
-                           │
-     ┌─────────────────────┴─────────────────────┐
-     ▼                                           ▼
+  Action | Result | Why
+  Write to own `work/` | ✓ Allowed | SGID 2770, agent owns its group
+  Write to own `home/` | ✓ Allowed | 0700 owned by agent
+  Write to shared project (`bot` group) | ✓ Allowed | Member of `bot` group
+  Write to `/tmp/` | ✓ Allowed | World-writable (sticky bit)
+  Write to `/opt/homebrew/` (brew) | ✗ Blocked | Owned by `root:admin`
+  Write to `/usr/local/` (brew, npm -g) | ✗ Blocked | Owned by `root:wheel`
+  Read human's `~/.ssh/` | ✗ Blocked | 0700 owned by human
+  Read human's `~/.aws/` | ✗ Blocked | 0700 owned by human
+  Read another agent's `work/` | ✗ Blocked | Separate UNIX group
+  Read another agent's `home/` | ✗ Blocked | 0700, different owner
+  Escalate via `sudo` | ✗ Blocked | Agent user not in sudoers
+  Send network requests | ✓ Allowed | No egress restrictions
+  Read inherited environment vars | ✗ Blocked | `env -i` strips everything
 
+The three most relevant real-world consequences:
 
-/var/bot/clio/                              /var/bot/codex/
-Owner: clio:clio                            Owner: codex:codex
-├── home/ (0700)                            ├── home/ (0700)
-└── work/ (2770, SGID)                      └── work/ (2770, SGID)
+brew install — fails because the agent cannot write to /opt/homebrew/ or
+/usr/local/. If you need an agent to install packages, delegate: botadm run clio
+brew install asks sudo for a password, which the human must provide
+interactively.
 
-By assigning a dedicated, unique group to each agent (e.g., group clio for user
-clio), we completely eliminate cross-agent read/write access.
+npm install -g — fails for the same reason. Per-project npm install (without -g)
+works fine inside work/ or a shared project.
 
-3. Reference Implementation (Manual Commands)
+Credential exfiltration — the agent has no access to ~/.ssh/, ~/.aws/,
+~/.config/git/, or any other sensitive path owned by the human. The sanitized
+environment ensures nothing leaks via variables either.
 
-The following commands represent the underlying security system configuration
-steps.
+------------------------------------------------------------------------
+
+2. Architecture: Headless Namespaces
+
+Each agent gets its own lightweight, templated layout under /var/bot. The
+structure provides a system User, Group, Home, and shared Work directory —
+nothing more.
+
+                        /var/bot/ (0755 root:root)
+                            │
+            ┌───────────────┴───────────────┐
+            ▼                               ▼
+    
+    /var/bot/clio/                    /var/bot/codex/
+    Owner: clio:clio                  Owner: codex:codex
+    ├── home/ (0700)                  ├── home/ (0700)
+    └── work/ (2770, SGID)            └── work/ (2770, SGID)
+
+By assigning a dedicated, unique system group to each agent (e.g., group clio
+for user clio), cross-agent read/write access is eliminated at the OS level.
+Every agent also belongs to a shared supplementary group bot for multi-agent
+project collaboration.
+
+Here is the full permission scheme in practice:
+
+    # Sandbox infrastructure — each agent isolated by its own group
+    $ ls -la /var/bot/
+    drwxr-xr-x   root  root    .                       # world-traversable
+    drwxr-x---   you   clio    clio/                   # agent clio's namespace
+    drwxr-x---   you   codex   codex/                  # agent codex's namespace
+    
+    $ ls -la /var/bot/clio/
+    drwx------   clio  clio    home/                   # agent-private (0700)
+    drwxrwx---   you   clio    work/                   # agent staging (2770 SGID)
+    
+    # Project shared with all agents via the bot group
+    $ ls -la /path/to/project/
+    drwxrwx---   you   bot     .                       # owner rwx, group rwx
+    -rw-rw----   you   bot     README.md               # owner rw, group rw
+    -rw-rw----   you   bot     main.py
+
+How files are owned and accessed
+
+  Directory | New file owned by | Human access | Agent access
+  `home/` (0700) | `clio:clio` | `sudo` only | `clio` only
+  `work/` (2770, SGID) | creator:`clio` | via group or `sudo` | via group
+  Shared project (2770, SGID) | creator:`bot` | via `bot` group | via `bot` group
+
+The SGID bit on work/ and on shared projects ensures files inherit the
+directory's group regardless of who created them — no manual chgrp after every
+edit.
+
+What you need to join
+For the shared project, you must join the bot group — otherwise files agents
+create there are owned by clio:bot and you have neither ownership nor group
+access:
+
+    # Linux
+    sudo usermod -aG bot $USER
+    # macOS
+    sudo dseditgroup -o edit -a $USER -t user bot
+
+For an agent's work/ directory, you have two choices:
+
+Join the agent's group — gives you direct read/write access to agent-created
+files without sudo:
+
+    # Linux
+    sudo usermod -aG clio $USER
+    # macOS
+    sudo dseditgroup -o edit -a $USER -t user clio
+
+Use sudo or botadm run — read agent output by running commands as the agent:
+
+    sudo -u clio cat /var/bot/clio/work/output.txt
+    botadm run clio cat /var/bot/clio/work/output.txt
+
+Joining an agent's group does not reduce security — you already have root access
+via sudo. The real isolation boundary is between agents, and that remains
+intact: codex is not in group clio and cannot access clio's files.
+
+------------------------------------------------------------------------
+
+3. Reference Implementation
+
+The commands below illustrate the manual setup. In practice these steps are
+automated by botadm (see Section 4). Linux and macOS have different user
+management toolchains, so both are shown; pick the one for your OS.
 
 Step 1: Create the Agent Group & User
+Linux (shadow-utils):
 
-Create a system-level group and user with no password, no login shell, and a
-designated isolated home directory.
+    export BOT="clio"
+    
+    sudo groupadd "$BOT"
+    sudo useradd --system \
+                 --gid "$BOT" \
+                 --home-dir "/var/bot/$BOT/home" \
+                 --create-home \
+                 --shell /usr/sbin/nologin \
+                 "$BOT"
 
-# Define your agent name
-export BOT="clio"
+macOS (dscl):
 
-# Create a dedicated group for this specific agent
-sudo groupadd "$BOT"
-
-# Create a system user tied strictly to that group
-sudo useradd --system \
-             --gid "$BOT" \
-             --home-dir "/var/bot/$BOT/home" \
-             --create-home \
-             --shell /usr/sbin/nologin \
-             "$BOT"
-
+    export BOT="clio"
+    
+    # Find a free GID in the agent range and create the group
+    sudo dscl . -create /Groups/"$BOT"
+    sudo dscl . -create /Groups/"$BOT" PrimaryGroupID 450
+    sudo dscl . -create /Groups/"$BOT" Password "*"
+    
+    # Find a free UID and create the user
+    sudo dscl . -create /Users/"$BOT"
+    sudo dscl . -create /Users/"$BOT" UniqueID 450
+    sudo dscl . -create /Users/"$BOT" PrimaryGroupID 450
+    sudo dscl . -create /Users/"$BOT" NFSHomeDirectory "/var/bot/$BOT/home"
+    sudo dscl . -create /Users/"$BOT" UserShell /usr/bin/false
+    sudo dscl . -create /Users/"$BOT" RealName "Agent: $BOT"
+    sudo dscl . -create /Users/"$BOT" Password "*"
 
 Step 2: Establish the Namespace and Permissions
+Create the shared bot group that all agents will belong to:
 
-Set up the workspace where you and the agent will collaborate. By using the SGID
-(Set Group ID) bit on the workspace, we ensure file-sharing between your host
-user and the agent remains effortless and consistent.
+Linux:
 
-# Create the secure workspace and home hierarchy
-sudo mkdir -p "/var/bot/$BOT/work"
+    sudo groupadd --force bot
 
-# Set ownership: You own it, but the agent's dedicated group has collaborative
-# access
-sudo chown -R $USER:"$BOT" "/var/bot/$BOT/work"
+macOS:
 
-# Enforce strict group permissions:
-# - '2': Sets the SGID bit. Files created in 'work/' inherit the '$BOT' group
-#   ownership.
-# - '770': Read/Write/Execute for you and the bot; zero access for everyone
-#   else.
-sudo chmod 2770 "/var/bot/$BOT/work"
+    sudo dscl . -create /Groups/bot
+    sudo dscl . -create /Groups/bot PrimaryGroupID 440
+    sudo dscl . -create /Groups/bot Password "*"
 
-# Ensure the agent's private home directory is fully locked down
-sudo chmod 700 "/var/bot/$BOT/home"
-sudo chown "$BOT":"$BOT" "/var/bot/$BOT/home"
+Then set up the workspace hierarchy. The SGID bit on work/ is the key mechanism:
+files created by either party inherit the bot's group, so explicit chown after
+every operation is unnecessary.
 
+    # Create the workspace and home hierarchy
+    sudo mkdir -p "/var/bot/$BOT/work"
+    
+    # You own the workspace; the agent's group has collaborative access
+    sudo chown -R $USER:"$BOT" "/var/bot/$BOT/work"
+    
+    #  2 = SGID — new files inherit the $BOT group
+    # 770 = rwx for you and the bot, zero for everyone else
+    sudo chmod 2770 "/var/bot/$BOT/work"
+    
+    # Lock down the agent's private home directory
+    sudo chmod 700 "/var/bot/$BOT/home"
+    sudo chown "$BOT":"$BOT" "/var/bot/$BOT/home"
 
-Step 3: Configure Wildcard-Free Sudo Rules
+Step 3: Configure Sudo Rules
+Authorize the host user to run commands as any bot user without permitting root
+escalation. botadm create automates this, but the manual equivalent is:
 
-To avoid opening security holes, explicitly authorize your host user to run
-commands as any user within the /var/bot sandbox ecosystem, without permitting
-them to run commands as root.
+    # /etc/sudoers.d/bot-rules (created with visudo):
+    devuser ALL=(clio, codex) NOPASSWD: ALL
 
-This step is automated by botadm create (see Section 4). It writes a per-bot
-drop-in to /etc/sudoers.d/bot-<name> and validates it with visudo -cf. Use --no-
-sudoers to skip.
+Pass --no-sudoers to botadm create to skip the automation, then add the rule
+yourself. The bot-specific rule can be password-gated or NOPASSWD — either way,
+it only governs access to the bot user, not the bot user's access. The agent
+itself has no sudo privileges.
 
-Manual equivalent, for reference:
-
-Create /etc/sudoers.d/bot-rules using visudo:
-
-# Allow your primary user to run commands as any user belonging to clio or codex
-devuser ALL=(clio, codex) NOPASSWD: ALL
-
+------------------------------------------------------------------------
 
 4. Automation Suite: botadm
 
-To manage this layout cleanly, we run the dedicated companion tool botadm. It
-leverages Python's argparse standard library to govern user creation, directory
-partitioning via pathlib, secure permission masking, and sanitized target
-runtime environments.
+botadm is a Python CLI that governs the full agent lifecycle — creation,
+quarantine, teardown, and sandboxed execution. Two implementations ship with the
+project:
+
+  File | Platform | User/Group API
+  `src/laia.py` | macOS | `dscl` (Directory Service command line)
+  `src/laia_linux.py` | Linux | `groupadd`, `useradd`, `groupdel`, `userdel`
+
+Both expose the same interface (init, create, disable, destroy, run) and share
+the same architectural principles. Only the system-level CRUD operations differ.
 
 System Configuration Lifecycle
 
-botadm init Initializes the base directory at /var/bot with strictly defined
-    permissions (0755 root-owned), establishing the root namespace.
+botadm init
+Initializes the root namespace at /var/bot with strict ownership (root:root) and
+permissions (0755). Also creates the shared bot group that all agents will
+belong to as a supplementary group. Must be run once before any other command.
 
-botadm create [--no-sudoers] Provisions the custom user and group namespaces,
-    defines their secure home directory (0700 permission-locked), and sets up
-    the collaborative workspace with dynamic SGID bits (2770) mapping the
-    caller's ID and the target bot group. By default, also writes a validated
-    sudoers drop-in to /etc/sudoers.d/bot-<name>. Use --no-sudoers to skip.
+botadm create [--no-sudoers]
+Provisions a new bot namespace:
 
-botadm disable Instantly quarantines the bot namespace. The user account shell
-    is forced to /usr/sbin/nologin and the directories are masked with 0000
-    permission settings to completely isolate ongoing filesystem interactions.
+Creates a dedicated system group and headless system user (shell:
+/usr/sbin/nologin on Linux, /usr/bin/false on macOS).
 
-botadm destroy [--no-sudoers] Reverses create: removes the sudoers drop-in,
-    deletes the system user (with -r to remove home), deletes the system group,
-    and removes the namespace directory tree under /var/bot/<name>. Use
-    --no-sudoers to preserve the sudoers rule.
+Adds the agent user to the shared supplementary group bot for cross-agent
+project collaboration.
+
+Creates the agent's home directory (0700, permission-locked) and collaborative
+workspace (2770 with SGID).
+
+Assigns workspace ownership to the invoking (sudo) user and the bot's group.
+
+By default, writes a validated sudoers drop-in to /etc/sudoers.d/bot-<name>.
+Pass --no-sudoers to skip.
+
+On failure, all partially-created resources (group, user, directories) are
+rolled back automatically.
+
+botadm disable
+Reversibly quarantines a bot:
+
+Linux: locks the account password (usermod -L), forces the shell to
+/usr/sbin/nologin.
+
+macOS: removes the AuthenticationAuthority (disables all login methods), forces
+the shell to /usr/bin/false.
+
+Both platforms: masks all namespace directories with 0000 permissions.
+
+The sudoers rule and directory contents are preserved, allowing the bot to be
+re-enabled later by restoring permissions and unlocking the account.
+
+botadm destroy [--no-sudoers]
+Permanently removes a bot:
+
+Deletes the sudoers drop-in (unless --no-sudoers is given).
+
+Removes the system user (userdel -r on Linux; dscl . -delete on macOS).
+
+Removes the system group (groupdel on Linux; dscl . -delete on macOS).
+
+Deletes the entire namespace tree under /var/bot/<name>.
+
+This operation is irreversible.
 
 Sandboxed Execution Context
 
-botadm run [args...] Clears the surrounding environmental variables using
-    env -i, initializes localized paths, establishes safe umask 007 settings,
-    and safely delegates control to the target bot user.
+botadm run <bot> <command...>
+Executes a command inside the bot's sandbox:
+
+Clears the environment — env -i strips all inherited variables.
+
+Sets a minimal whitelist — only HOME, USER, LOGNAME, PATH, TERM, and PWD are
+defined, all pointing inside the sandbox.
+
+Applies umask 007 — files created are group-readable/writable but world-
+inaccessible.
+
+Drops privileges — delegates to the target bot user via sudo -u (not sudo -i,
+because the bot's shell is nologin).
+
+------------------------------------------------------------------------
 
 5. Design Decisions
 
-Per-Bot Sudoers Drop-Ins:
-Each agent receives its own sudoers file at /etc/sudoers.d/bot-<name> rather
-than sharing a single bot-rules file. This avoids parsing and editing existing
-sudoers syntax, makes per-agent cleanup a simple file deletion, and limits the
-blast radius of a malformed rule to a single agent.
+Per-Bot Sudoers Drop-Ins
+Each agent gets its own file at /etc/sudoers.d/bot-<name> rather than sharing a
+single bot-rules file. This avoids parsing and editing sudoers syntax, makes
+per-agent cleanup a simple rm, and limits the blast radius of a malformed rule
+to one agent.
 
-Sudoers Automation (Opt-Out):
-botadm create configures the sudoers rule by default because the sandbox is
+Sudoers Automation (Opt-Out)
+botadm create writes the NOPASSWD sudoers rule by default because the sandbox is
 unusable without sudo access to the target user. The --no-sudoers flag exists
 for environments with pre-existing sudoers management or strict change-control
 policies.
 
-0440 Permission on Sudoers Files:
-Standard sudoers drop-in files must be owned by root:root with 0440 permissions;
-visudo(8) enforces this requirement at validation time. The install helper
-writes at 0440 and validates with visudo -cf before considering the rule active.
+Password-Gated Sudo (Host User)
+The bot-specific sudoers rule only governs access to the agent — it's a
+convenience, not a security control. The real defense-in-depth is the host
+user's own sudo access. On macOS, admin accounts have passwordless sudo by
+default (via %admin group rules). If an agent somehow achieves host-level code
+execution (e.g., via a shell injection that escapes the sandbox), that
+passwordless sudo becomes an escalation path.
 
-sudo -u vs sudo -i in Execution Context:
-The agent user's shell is /usr/sbin/nologin, which immediately rejects
-interactive login. Using sudo -i would invoke nologin as a login shell and fail.
-Instead, sudo -u bypasses the login shell entirely and delegates full
-environment control to env -i, which sets only the whitelisted variables (HOME,
-USER, LOGNAME, PATH, TERM, PWD).
+To password-gate your own sudo:
 
-Disable vs Destroy:
-These are semantically distinct operations. disable is a reversible quarantine —
-the account is locked and filesystem permissions are stripped (0000), but the
-data remains intact and the sudoers rule is preserved. destroy is permanent
-teardown — the user, group, data directory, and sudoers rule are all removed.
-This separation allows suspending an agent without losing state.
+    # Remove yourself from the admin group (macOS) — every sudo will prompt
+    sudo dseditgroup -o edit -d $USER -t user admin
+    
+    # Or use a specific sudoers rule to require a password
+    # /etc/sudoers.d/apalala:
+    apalala ALL=(ALL) ALL
 
-Rollback Safety in Create:
-Provisioning is multi-step (group, user, directories, permissions, sudoers). If
-any step fails after partial progress, earlier steps are reversed in order:
-directories removed, user deleted, group deleted. This prevents orphaned system
-accounts and avoids leaving the system in an inconsistent state.
+Trade-off: every sudo (including botadm run) will prompt for your password. This
+is the intended defense — a prompt the agent cannot answer.
 
-Platform Validation Before State Changes:
-The botadm commands check for required tools (groupadd, useradd, groupdel,
-userdel, visudo) before making any system modifications. This fails fast with a
-clear diagnostic rather than producing opaque error messages from missing
-commands midway through a multi-step operation.
+0440 on Sudoers Files
+Drop-in files must be owned by root:root with 0440 permissions; visudo(8)
+enforces this. The install helper sets 0440, then validates with visudo -cf
+before considering the rule active.
 
-Environment Hygiene in Run:
-env -i strips all inherited environment variables before setting a minimal
-whitelist. This ensures agent processes cannot inherit the host user's PATH, API
-keys, or database credentials. The whitelist is deliberately minimal — only what
-is strictly needed for predictable CLI tool behavior.
+sudo -u Not sudo -i
+The agent's shell is /usr/sbin/nologin, which rejects interactive login. Using
+sudo -i would invoke nologin and fail immediately. sudo -u bypasses the login
+shell entirely and delegates environment control to env -i.
 
-umask 007:
-Files created inside the sandbox should be readable and writable by the agent's
-group (enabling transparent workspace collaboration with the host user via SGID)
-but inaccessible to all other system users. 007 grants group rwx while stripping
-world access entirely.
+Disable vs Destroy
+These are semantically distinct. disable is a reversible quarantine — the
+account is locked, permissions stripped, but data and sudoers rule preserved.
+destroy is permanent teardown — user, group, data, and sudoers are all removed.
+This separation lets you suspend an agent without losing state.
+
+Rollback Safety
+Provisioning is multi-step (group → user → directories → permissions → sudoers).
+If any step fails after partial progress, earlier steps are undone: directories
+removed, user deleted, group deleted. This prevents orphaned system accounts.
+
+Platform Validation
+Each implementation checks for its required tools before making system changes:
+Linux verifies groupadd, useradd, groupdel, userdel, visudo; macOS verifies dscl
+and visudo. This fails fast with a clear diagnostic rather than producing opaque
+errors mid-operation.
+
+Platform-Specific Implementations
+The architecture's principles (user/group isolation, SGID collaboration, sudo
+delegation) are OS-agnostic, but the tools to manipulate users and groups are
+not. Linux uses shadow-utils; macOS uses the Directory Service (dscl). Rather
+than abstracting this behind conditionals in a single script, we provide
+separate, focused implementations — one per platform. They share the same CLI
+interface, directory layout, and security model, making them drop-in
+replacements. A single script would couple the two API surfaces, making every
+change harder to test and review. Separating them keeps each implementation
+simple, auditable, and idiomatic for its platform.
+
+Environment Hygiene
+env -i strips all inherited variables; only a minimal whitelist is set. This
+prevents the host user's PATH, API keys, or database credentials from leaking
+into agent processes.
+
+umask 007
+Files created inside the sandbox should be group-accessible (enabling
+collaboration via SGID) but world-inaccessible. 007 grants group rwx while
+stripping world access entirely.
+
+------------------------------------------------------------------------
 
 6. Limitations & Future Work
 
-Network Isolation: This design does not address network egress. A compromised
-agent with network access can still exfiltrate data. Future iterations could
-wrap the run command with unshare -n and iptables/nftables rules or use bpfilter
-to restrict outbound connections on a per-bot basis.
+Network Isolation
+This design covers filesystem and credential containment only. A compromised
+agent with network access can still exfiltrate data. A future iteration could
+wrap botadm run with unshare -n and iptables/nftables rules, or use bpfilter to
+restrict outbound connections on a per-bot basis.
 
-Rollback Safety: The create subcommand cleans up partial state on failure
-(removing user, group, and directories if any intermediate step fails), but
-destroy is irreversible — use with care.
+Irreversibility
+botadm create cleans up partial state on failure, but botadm destroy is
+intentionally irreversible — the namespace, user, group, and sudoers rule are
+all removed in one operation.
