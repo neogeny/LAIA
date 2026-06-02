@@ -207,6 +207,10 @@ def cmdcreate(args):
 
     # Determine invoking user and their PATH
     realuser = getuser()
+
+    # Check if system group/user already exist — reuse when present
+    group_exists = _dscl_quiet("-read", f"/Groups/{bot}")
+    user_exists = _dscl_quiet("-read", f"/Users/{bot}")
     try:
         real_path = subprocess.run(
             ["sudo", "-u", realuser, "printenv", "PATH"],
@@ -234,23 +238,39 @@ def cmdcreate(args):
         print("Proceeding without prompting (force).")
 
     try:
-        gid = _free_id("Groups", "PrimaryGroupID")
-        _dscl("-create", f"/Groups/{bot}")
-        _dscl("-create", f"/Groups/{bot}", "PrimaryGroupID", str(gid))
-        _dscl("-create", f"/Groups/{bot}", "Password", "*")
-        group_created = True
-        print(f"-> Group '{bot}' created (GID {gid}).")
+        # Create group only if it does not already exist
+        if not group_exists:
+            gid = _free_id("Groups", "PrimaryGroupID")
+            _dscl("-create", f"/Groups/{bot}")
+            _dscl("-create", f"/Groups/{bot}", "PrimaryGroupID", str(gid))
+            _dscl("-create", f"/Groups/{bot}", "Password", "*")
+            group_created = True
+            print(f"-> Group '{bot}' created (GID {gid}).")
+        else:
+            print(f"-> Group '{bot}' already exists; reusing it.")
+            # try to find its GID for later ownership operations
+            try:
+                import grp
+                gid = grp.getgrnam(bot).gr_gid
+            except Exception:
+                gid = None
 
-        uid = _free_id("Users", "UniqueID")
-        _dscl("-create", f"/Users/{bot}")
-        _dscl("-create", f"/Users/{bot}", "UniqueID", str(uid))
-        _dscl("-create", f"/Users/{bot}", "PrimaryGroupID", str(gid))
-        _dscl("-create", f"/Users/{bot}", "NFSHomeDirectory", str(botdir))
-        _dscl("-create", f"/Users/{bot}", "UserShell", "/bin/zsh")
-        _dscl("-create", f"/Users/{bot}", "RealName", f"Agent: {bot}")
-        _dscl("-create", f"/Users/{bot}", "Password", "*")
-        user_created = True
-        print(f"-> User '{bot}' created (UID {uid}).")
+        # Create user only if it does not already exist
+        if not user_exists:
+            uid = _free_id("Users", "UniqueID")
+            _dscl("-create", f"/Users/{bot}")
+            _dscl("-create", f"/Users/{bot}", "UniqueID", str(uid))
+            # if group was created above use its gid, otherwise let dscl decide
+            if gid is not None:
+                _dscl("-create", f"/Users/{bot}", "PrimaryGroupID", str(gid))
+            _dscl("-create", f"/Users/{bot}", "NFSHomeDirectory", str(botdir))
+            _dscl("-create", f"/Users/{bot}", "UserShell", "/bin/zsh")
+            _dscl("-create", f"/Users/{bot}", "RealName", f"Agent: {bot}")
+            _dscl("-create", f"/Users/{bot}", "Password", "*")
+            user_created = True
+            print(f"-> User '{bot}' created (UID {uid}).")
+        else:
+            print(f"-> User '{bot}' already exists; reusing it.")
 
         # Create namespace directory
         botdir.mkdir(parents=True, exist_ok=True)
@@ -269,7 +289,7 @@ def cmdcreate(args):
         os.chown(str(botdir), realuid, botgid)
         botdir.chmod(0o2770)
 
-            # Persist environment (store as key=value lines)
+        # Persist environment (store as key=value lines)
         env_dict = AGENT_ENV.copy()
         env_dict["PATH"] = real_path
         _laia_env = botdir / "env"
@@ -499,7 +519,7 @@ def cmddestroy(args):
     bot = args.bot
 
     print(f"Destroying agent: {bot}")
-    print("This is permanent and will delete the system user, group, and namespace directory.")
+    print("This will remove the namespace directory and sudoers rule. The system user and group will be preserved.")
     if not getattr(args, 'force', False):
         print("Type the agent name to confirm: ", end="")
         try:
@@ -515,27 +535,10 @@ def cmddestroy(args):
     if not args.no_sudoers:
         _remove_sudoers(bot)
 
-    if _dscl_quiet("-delete", f"/Users/{bot}"):
-        print(f"-> System user '{bot}' removed.")
-    else:
-        # Check if the user exists at all
-        result = subprocess.run(
-            ["dscl", ".", "-read", f"/Users/{bot}"],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            print(f"-> System user '{bot}' did not exist.")
-
-    if _dscl_quiet("-delete", f"/Groups/{bot}"):
-        print(f"-> System group '{bot}' removed.")
-    else:
-        result = subprocess.run(
-            ["dscl", ".", "-read", f"/Groups/{bot}"],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            print(f"-> System group '{bot}' did not exist.")
-
+    # Do NOT delete the system user or group; leave them in place.
+    # Previously we removed the user and group. That behavior is unsafe when
+    # the system user may be shared or managed externally.
+    
     botdir = BOTROOT / bot
     if botdir.exists():
         shutil.rmtree(botdir)
@@ -543,7 +546,7 @@ def cmddestroy(args):
     else:
         print(f"-> Directory {botdir} did not exist.")
 
-    print(f"Agent '{bot}' destroyed.")
+    print(f"Agent '{bot}' destroyed (namespace and sudoers cleaned; user/group preserved).")
 
 
 

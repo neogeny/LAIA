@@ -450,25 +450,8 @@ def cmddestroy(args):
     if not args.no_sudoers:
         _remove_sudoers(bot)
 
-    try:
-        subprocess.run(["userdel", "-r", bot], check=True, capture_output=True)
-        print(f"-> System user '{bot}' removed.")
-    except subprocess.CalledProcessError as err:
-        msg = err.stderr.decode().strip()
-        if "does not exist" in msg:
-            print(f"-> System user '{bot}' did not exist.")
-        else:
-            print(f"Warning: could not remove user '{bot}': {msg}", file=sys.stderr)
-
-    try:
-        subprocess.run(["groupdel", bot], check=True, capture_output=True)
-        print(f"-> System group '{bot}' removed.")
-    except subprocess.CalledProcessError as err:
-        msg = err.stderr.decode().strip()
-        if "does not exist" in msg:
-            print(f"-> System group '{bot}' did not exist.")
-        else:
-            print(f"Warning: could not remove group '{bot}': {msg}", file=sys.stderr)
+    # Do NOT delete the system user or group; preserve them.
+    print("-> Preserving system user and group (will not delete system account/group).")
 
     botdir = BOTROOT / bot
     if botdir.exists():
