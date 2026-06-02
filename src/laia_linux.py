@@ -317,6 +317,13 @@ def cmdupdate(args):
     bashrc.chmod(0o644)
     os.chown(str(bashrc), botuid, botgid)
 
+    # Attempt to set the user's login shell to bash (best-effort)
+    try:
+        subprocess.run(["usermod", "-s", "/bin/bash", bot], check=True, capture_output=True)
+        print("-> User shell set to /bin/bash.")
+    except subprocess.CalledProcessError:
+        print("Warning: could not set user shell to /bin/bash (non-fatal).", file=sys.stderr)
+
     print(f"-> Configuration for '{bot}' updated.")
 
 
@@ -581,7 +588,7 @@ def cmdrun(args):
         f"PATH={_stored_path}",
         "TERM=xterm-256color",
         f"PWD={botwork}",
-        f"PS1=\[\033[1;32m\]\u@{bot}\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ ",
+        f"PS1=\\[\\033[1;32m\\]\\u@{bot}\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
     ]
 
     sudocmd = [
@@ -635,6 +642,10 @@ def main():
     parser_destroy.add_argument(
         "--no-sudoers", action="store_true",
         help="Skip removing the sudoers drop-in rule.",
+    )
+    parser_destroy.add_argument(
+        "--force", "-f", action="store_true",
+        help="Skip interactive prompts (force).",
     )
 
     parser_share = subparsers.add_parser(

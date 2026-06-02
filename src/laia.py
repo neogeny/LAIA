@@ -371,6 +371,25 @@ def cmdupdate(args):
     zshrc.chmod(0o644)
     os.chown(str(zshrc), botuid, botgid)
 
+    # Attempt to set the user's login shell to zsh (best-effort)
+    try:
+        try:
+            _dscl("-create", f"/Users/{bot}", "UserShell", "/bin/zsh")
+            print("-> User shell set to /bin/zsh.")
+        except subprocess.CalledProcessError:
+            try:
+                _dscl("-change", f"/Users/{bot}", "UserShell", "/bin/bash", "/bin/zsh")
+                print("-> User shell changed to /bin/zsh.")
+            except subprocess.CalledProcessError:
+                try:
+                    _dscl("-change", f"/Users/{bot}", "UserShell", "/usr/bin/false", "/bin/zsh")
+                    print("-> User shell changed to /bin/zsh.")
+                except subprocess.CalledProcessError:
+                    print("Warning: could not set user shell to /bin/zsh (non-fatal).", file=sys.stderr)
+    except Exception:
+        # Best-effort; do not fail the update if dscl changes cannot be made
+        pass
+
     print(f"-> Configuration for '{bot}' updated.")
 
 
@@ -646,7 +665,7 @@ def cmdrun(args):
     sudocmd = [
         "sudo", "-u", bot,
         "env", "-i", *envargs,
-        "bash", "-c", f"cd '{botwork}' && umask 007 && exec \"$@\"",
+        "zsh", "-c", f"cd '{botwork}' && umask 007 && exec \"$@\"",
         "--", *command,
     ]
 
@@ -773,8 +792,8 @@ def main():
     )
     parser_shell.add_argument("bot", help="Name of the bot container to enter.")
     parser_shell.add_argument(
-        "--shell", "-s", default="bash",
-        help="Shell to launch (default: bash).",
+        "--shell", "-s", default="zsh",
+        help="Shell to launch (default: zsh).",
     )
 
     args = parser.parse_args()
