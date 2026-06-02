@@ -130,7 +130,12 @@ def _remove_sudoers(bot):
 
 
 def _ensure_bot_group():
-    """Create the shared 'bot' group if it doesn't already exist."""
+    """Create the shared 'bot' group if it doesn't already exist.
+
+    When the group is created by this tool, add the invoking human user to it
+    (best-effort). The invoking user is determined via getuser(); if it is
+    'root' or absent, skip adding.
+    """
     import grp
     try:
         grp.getgrnam("bot")
@@ -143,6 +148,13 @@ def _ensure_bot_group():
          _dscl_quiet("-create", "/Groups/bot", "Password", "*")
     if ok:
         print(f"-> Shared group 'bot' created (GID {gid}).")
+        # Best-effort: add the invoking human to the group so they can access shared paths
+        try:
+            realuser = getuser()
+            if realuser and realuser != "root":
+                _add_to_bot_group(realuser)
+        except Exception:
+            pass
     else:
         print("Warning: could not create shared group 'bot'.", file=sys.stderr)
     return ok
@@ -579,6 +591,13 @@ def cmdshare(args):
             sys.exit(1)
         print(f"-> Group '{group}' created (GID {gid}).")
         group_exists = True
+        # When we created the group, add the invoking user so they can access shared paths
+        try:
+            realuser = getuser()
+            if realuser and realuser != "root":
+                _add_to_bot_group(realuser)
+        except Exception:
+            pass
 
     if not group_exists and not args.dry_run:
         print(f"Error: Group '{group}' does not exist. Use --create to create it.", file=sys.stderr)

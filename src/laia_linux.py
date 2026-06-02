@@ -93,13 +93,24 @@ def _remove_sudoers(bot):
 
 
 def _ensure_bot_group():
-    """Create the shared 'bot' group if it doesn't already exist."""
+    """Create the shared 'bot' group if it doesn't already exist.
+
+    When created by the tool, add the invoking human user to the group so they
+    can access shared paths (best-effort). Skips adding 'root'.
+    """
     result = subprocess.run(
         ["groupadd", "--force", "bot"],
         capture_output=True, text=True,
     )
     if result.returncode == 0:
         print("-> Shared group 'bot' created.")
+        # Best-effort: add the invoking user
+        try:
+            realuser = getuser()
+            if realuser and realuser != "root":
+                _add_to_bot_group(realuser)
+        except Exception:
+            pass
     else:
         # groupadd --force with existing group returns 0, so non-zero is a real error
         import grp
@@ -505,6 +516,13 @@ def cmdshare(args):
             subprocess.run(["groupadd", group], check=True, capture_output=True)
             print(f"-> Group '{group}' created.")
             group_exists = True
+            # Best-effort: add the invoking user to the newly-created group so they can access shared paths
+            try:
+                realuser = getuser()
+                if realuser and realuser != "root":
+                    _add_to_bot_group(realuser)
+            except Exception:
+                pass
         except subprocess.CalledProcessError as err:
             print(f"Error: could not create group '{group}': {err}", file=sys.stderr)
             sys.exit(1)
