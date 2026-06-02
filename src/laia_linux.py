@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """
-Dynamic multi-agent sandbox controller (macOS / dscl).
-Handles lifecycle management (init, create, disable, destroy) and secure
-execution using the macOS Directory Service command-line tool.
+Dynamic multi-agent sandbox controller.
+Handles lifecycle management (init, create, disable, destroy) and secure execution.
 """
 
 import sys
 import os
 import shutil
-import re
 import subprocess
 import argparse
 from pathlib import Path
 
 BOTROOT = Path("/var/bot")
 SUDOERS_DIR = Path("/etc/sudoers.d")
-AGENT_UID_MIN = 450
-AGENT_UID_MAX = 499
 
 
 def checkroot():
@@ -38,52 +34,18 @@ def getuser():
 
 
 def _check_platform():
-    """Verify required macOS tools exist."""
-    for tool in ("dscl", "visudo"):
+    """Verify required system tools exist (Linux shadow-utils)."""
+    missing = []
+    for tool in ("groupadd", "useradd", "groupdel", "userdel", "visudo"):
         if not shutil.which(tool):
-            print(
-                f"Error: Required tool '{tool}' not found. "
-                "This implementation requires macOS with dscl.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-
-def _dscl(*args):
-    """Run dscl with the given arguments; return CompletedProcess."""
-    return subprocess.run(
-        ["dscl", ".", *args],
-        check=True, capture_output=True, text=True,
-    )
-
-
-def _dscl_quiet(*args):
-    """Run dscl silently; return True on success, False on failure."""
-    try:
-        _dscl(*args)
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def _free_id(entity, id_attr, min_id=AGENT_UID_MIN, max_id=AGENT_UID_MAX):
-    """Find the next free ID in the local directory service."""
-    result = subprocess.run(
-        ["dscl", ".", "-list", f"/{entity}", id_attr],
-        capture_output=True, text=True,
-    )
-    used = set()
-    for line in result.stdout.strip().split("\n"):
-        parts = line.split()
-        if len(parts) >= 2:
-            try:
-                used.add(int(parts[-1]))
-            except ValueError:
-                pass
-    for i in range(min_id, max_id + 1):
-        if i not in used:
-            return i
-    return max(used) + 1 if used else min_id
+            missing.append(tool)
+    if missing:
+        print(
+            f"Error: Required tools not found: {', '.join(missing)}. "
+            "LAIA requires Linux with shadow-utils installed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _install_sudoers(bot):
@@ -136,7 +98,7 @@ def cmdinit(args):
 
 
 def cmdcreate(args):
-    """Provision a new isolated agent namespace on macOS."""
+    """Provision a new isolated agent namespace: user, group, dirs, and sudoers."""
     checkroot()
     _check_platform()
     bot = args.bot
@@ -160,23 +122,15 @@ def cmdcreate(args):
     dirs_created = False
 
     try:
-        gid = _free_id("Groups", "PrimaryGroupID")
-        _dscl("-create", f"/Groups/{bot}")
-        _dscl("-create", f"/Groups/{bot}", "PrimaryGroupID", str(gid))
-        _dscl("-create", f"/Groups/{bot}", "Password", "*")
+        subprocess.run(["groupadd", bot], check=True, capture_output=True)
         group_created = True
-        print(f"-> Group '{bot}' created (GID {gid}).")
 
-        uid = _free_id("Users", "UniqueID")
-        _dscl("-create", f"/Users/{bot}")
-        _dscl("-create", f"/Users/{bot}", "UniqueID", str(uid))
-        _dscl("-create", f"/Users/{bot}", "PrimaryGroupID", str(gid))
-        _dscl("-create", f"/Users/{bot}", "NFSHomeDirectory", str(bothome))
-        _dscl("-create", f"/Users/{bot}", "UserShell", "/usr/bin/false")
-        _dscl("-create", f"/Users/{bot}", "RealName", f"Agent: {bot}")
-        _dscl("-create", f"/Users/{bot}", "Password", "*")
+        subprocess.run(
+            ["useradd", "--system", "--gid", bot,
+             "--home-dir", str(bothome), "--shell", "/usr/sbin/nologin", bot],
+            check=True, capture_output=True,
+        )
         user_created = True
-        print(f"-> User '{bot}' created (UID {uid}).")
 
         bothome.mkdir(parents=True, exist_ok=True)
         botwork.mkdir(parents=True, exist_ok=True)
@@ -205,9 +159,9 @@ def cmdcreate(args):
         if dirs_created:
             shutil.rmtree(botdir, ignore_errors=True)
         if user_created:
-            _dscl_quiet("-delete", f"/Users/{bot}")
+            subprocess.run(["userdel", "-r", bot], capture_output=True)
         if group_created:
-            _dscl_quiet("-delete", f"/Groups/{bot}")
+            subprocess.run(["groupdel", bot], capture_output=True)
         sys.exit(1)
 
     sudoers_installed = False
@@ -218,7 +172,7 @@ def cmdcreate(args):
     print(f"-> Home: {bothome}")
     print(f"-> Work: {botwork}")
     if sudoers_installed:
-        print("-> Sudoers: automatically configured")
+        print(f"-> Sudoers: automatically configured")
     else:
         realuser = getuser()
         print(f"\nTo enable execution, add this sudoers rule:")
@@ -226,24 +180,29 @@ def cmdcreate(args):
 
 
 def cmddisable(args):
-    """Quarantine an agent on macOS: lock account, strip filesystem permissions."""
+    """Quarantine an agent: lock account, strip filesystem permissions."""
     checkroot()
     bot = args.bot
     print(f"Disabling agent: {bot}")
 
     try:
-        _dscl("-delete", f"/Users/{bot}", "AuthenticationAuthority")
-        _dscl("-create", f"/Users/{bot}", "UserShell", "/usr/bin/false")
-        print(f"-> Account '{bot}' locked (auth removed, shell disabled).")
+        subprocess.run(
+            ["usermod", "-L", "-s", "/usr/sbin/nologin", bot],
+            check=True, capture_output=True,
+        )
+        print(f"-> Account '{bot}' locked, shell disabled.")
     except subprocess.CalledProcessError as err:
-        print(f"Warning: could not modify user '{bot}': {err}", file=sys.stderr)
+        print(
+            f"Warning: could not modify user: {err.stderr.decode().strip()}",
+            file=sys.stderr,
+        )
 
     botdir = BOTROOT / bot
     if botdir.exists():
         for subdir in botdir.iterdir():
             subdir.chmod(0o000)
         botdir.chmod(0o000)
-        print("-> Filesystem permissions stripped (0000 quarantine).")
+        print(f"-> Filesystem permissions stripped (0000 quarantine).")
     else:
         print(f"Error: Namespace for '{bot}' not found.", file=sys.stderr)
         sys.exit(1)
@@ -252,7 +211,7 @@ def cmddisable(args):
 
 
 def cmddestroy(args):
-    """Completely remove an agent on macOS: user, group, directory, sudoers."""
+    """Completely remove an agent: user, group, directory, and sudoers rule."""
     checkroot()
     _check_platform()
     bot = args.bot
@@ -262,26 +221,25 @@ def cmddestroy(args):
     if not args.no_sudoers:
         _remove_sudoers(bot)
 
-    if _dscl_quiet("-delete", f"/Users/{bot}"):
+    try:
+        subprocess.run(["userdel", "-r", bot], check=True, capture_output=True)
         print(f"-> System user '{bot}' removed.")
-    else:
-        # Check if the user exists at all
-        result = subprocess.run(
-            ["dscl", ".", "-read", f"/Users/{bot}"],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
+    except subprocess.CalledProcessError as err:
+        msg = err.stderr.decode().strip()
+        if "does not exist" in msg:
             print(f"-> System user '{bot}' did not exist.")
+        else:
+            print(f"Warning: could not remove user '{bot}': {msg}", file=sys.stderr)
 
-    if _dscl_quiet("-delete", f"/Groups/{bot}"):
+    try:
+        subprocess.run(["groupdel", bot], check=True, capture_output=True)
         print(f"-> System group '{bot}' removed.")
-    else:
-        result = subprocess.run(
-            ["dscl", ".", "-read", f"/Groups/{bot}"],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
+    except subprocess.CalledProcessError as err:
+        msg = err.stderr.decode().strip()
+        if "does not exist" in msg:
             print(f"-> System group '{bot}' did not exist.")
+        else:
+            print(f"Warning: could not remove group '{bot}': {msg}", file=sys.stderr)
 
     botdir = BOTROOT / bot
     if botdir.exists():
@@ -333,7 +291,7 @@ def cmdrun(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="LAIA sandbox controller (macOS / dscl)."
+        description="Unified local agent sandbox administration and runtime container tool."
     )
     subparsers = parser.add_subparsers(dest="action", required=True)
 

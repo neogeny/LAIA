@@ -1,8 +1,10 @@
 # Local Agent Isolation Architecture
 ## Multi-Agent Sandboxing via Headless UNIX Namespaces
 
-> **Platform:** Linux with shadow-utils (`groupadd`, `useradd`, `visudo`). Not
-> compatible with macOS or BSD out of the box.
+> **Platforms:** macOS — `laia.py` (dscl). Linux — `laia_linux.py`
+> (shadow-utils `groupadd`/`useradd`). The principles are identical; the
+> implementations differ because user and group management APIs are OS-native
+> and irreducibly platform-specific.
 
 This document describes a local isolation strategy designed to run autonomous
 agents inside strict, independent security boundaries. It leverages native UNIX
@@ -66,23 +68,41 @@ world-readable permissions.
 ## 3. Reference Implementation
 
 The commands below illustrate the manual setup. In practice these steps are
-automated by `botadm` (see Section 4).
+automated by `botadm` (see Section 4). Linux and macOS have different user
+management toolchains, so both are shown; pick the one for your OS.
 
 ### Step 1: Create the Agent Group & User
 
+**Linux** (shadow-utils):
 ```bash
 export BOT="clio"
 
-# Create a dedicated system group for this agent
 sudo groupadd "$BOT"
-
-# Create a headless system user tied to that group
 sudo useradd --system \
              --gid "$BOT" \
              --home-dir "/var/bot/$BOT/home" \
              --create-home \
              --shell /usr/sbin/nologin \
              "$BOT"
+```
+
+**macOS** (dscl):
+```bash
+export BOT="clio"
+
+# Find a free GID in the agent range and create the group
+sudo dscl . -create /Groups/"$BOT"
+sudo dscl . -create /Groups/"$BOT" PrimaryGroupID 450
+sudo dscl . -create /Groups/"$BOT" Password "*"
+
+# Find a free UID and create the user
+sudo dscl . -create /Users/"$BOT"
+sudo dscl . -create /Users/"$BOT" UniqueID 450
+sudo dscl . -create /Users/"$BOT" PrimaryGroupID 450
+sudo dscl . -create /Users/"$BOT" NFSHomeDirectory "/var/bot/$BOT/home"
+sudo dscl . -create /Users/"$BOT" UserShell /usr/bin/false
+sudo dscl . -create /Users/"$BOT" RealName "Agent: $BOT"
+sudo dscl . -create /Users/"$BOT" Password "*"
 ```
 
 ### Step 2: Establish the Namespace and Permissions
@@ -126,7 +146,17 @@ validates it with `visudo -cf`. Pass `--no-sudoers` to skip.
 ## 4. Automation Suite: `botadm`
 
 `botadm` is a Python CLI that governs the full agent lifecycle — creation,
-quarantine, teardown, and sandboxed execution.
+quarantine, teardown, and sandboxed execution. Two implementations ship with
+the project:
+
+| File | Platform | User/Group API |
+|---|---|---|
+| `src/laia.py` | macOS | `dscl` (Directory Service command line) |
+| `src/laia_linux.py` | Linux | `groupadd`, `useradd`, `groupdel`, `userdel` |
+
+Both expose the same interface (`init`, `create`, `disable`, `destroy`, `run`)
+and share the same architectural principles. Only the system-level CRUD
+operations differ.
 
 ### System Configuration Lifecycle
 
@@ -141,7 +171,7 @@ command.
 Provisions a new bot namespace:
 
 1. Creates a dedicated system group and headless system user (shell:
-   `/usr/sbin/nologin`).
+   `/usr/sbin/nologin` on Linux, `/usr/bin/false` on macOS).
 2. Creates the agent's home directory (`0700`, permission-locked) and
    collaborative workspace (`2770` with SGID).
 3. Assigns workspace ownership to the invoking (sudo) user and the bot's
@@ -156,9 +186,11 @@ rolled back automatically.
 
 Reversibly quarantines a bot:
 
-- Locks the account password (`usermod -L`).
-- Forces the shell to `/usr/sbin/nologin`.
-- Masks all namespace directories with `0000` permissions.
+- **Linux:** locks the account password (`usermod -L`), forces the shell to
+  `/usr/sbin/nologin`.
+- **macOS:** removes the `AuthenticationAuthority` (disables all login
+  methods), forces the shell to `/usr/bin/false`.
+- Both platforms: masks all namespace directories with `0000` permissions.
 
 The sudoers rule and directory contents are preserved, allowing the bot to be
 re-enabled later by restoring permissions and unlocking the account.
@@ -168,9 +200,8 @@ re-enabled later by restoring permissions and unlocking the account.
 Permanently removes a bot:
 
 - Deletes the sudoers drop-in (unless `--no-sudoers` is given).
-- Removes the system user (`userdel -r`, which also deletes the home
-  directory).
-- Removes the system group (`groupdel`).
+- Removes the system user (`userdel -r` on Linux; `dscl . -delete` on macOS).
+- Removes the system group (`groupdel` on Linux; `dscl . -delete` on macOS).
 - Deletes the entire namespace tree under `/var/bot/<name>`.
 
 **This operation is irreversible.**
@@ -228,9 +259,21 @@ directories removed, user deleted, group deleted. This prevents orphaned system
 accounts.
 
 **Platform Validation**  
-Commands check for required tools (`groupadd`, `useradd`, `groupdel`,
-`userdel`, `visudo`) before making any system changes. This fails fast with a
-clear diagnostic rather than producing opaque errors mid-operation.
+Each implementation checks for its required tools before making system changes:
+Linux verifies `groupadd`, `useradd`, `groupdel`, `userdel`, `visudo`; macOS
+verifies `dscl` and `visudo`. This fails fast with a clear diagnostic rather
+than producing opaque errors mid-operation.
+
+**Platform-Specific Implementations**  
+The architecture's principles (user/group isolation, SGID collaboration, sudo
+delegation) are OS-agnostic, but the tools to manipulate users and groups are
+not. Linux uses shadow-utils; macOS uses the Directory Service (`dscl`). Rather
+than abstracting this behind conditionals in a single script, we provide
+separate, focused implementations — one per platform. They share the same CLI
+interface, directory layout, and security model, making them drop-in
+replacements. A single script would couple the two API surfaces, making every
+change harder to test and review. Separating them keeps each implementation
+simple, auditable, and idiomatic for its platform.
 
 **Environment Hygiene**  
 `env -i` strips all inherited variables; only a minimal whitelist is set. This
