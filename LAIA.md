@@ -76,13 +76,13 @@ structure provides a system **User**, **Group**, and namespace **Workspace**
 directory — nothing more.
 
 ```
-                    /var/bot/ (0755 root:root)
+                    /var/bot/ (0755 root:wheel)
                         │
         ┌───────────────┴───────────────┐
         ▼                               ▼
 
 /var/bot/clio/                    /var/bot/codex/
-Owner: you:clio                   Owner: you:codex
+Owner: clio:clio                  Owner: codex:codex
 Permissions: 2770 (SGID)          Permissions: 2770 (SGID)
 ```
 
@@ -96,15 +96,14 @@ Here is the full permission scheme in practice:
 ```
 # Sandbox infrastructure — each agent isolated by its own group
 $ ls -la /var/bot/
-drwxr-xr-x   root  root    .                       # world-traversable
-drwxrws---   you   clio    clio/                   # agent clio's namespace (SGID)
-drwxrws---   you   codex   codex/                  # agent codex's namespace (SGID)
+drwxr-xr-x   root    wheel   .                       # world-traversable
+drwxrws---   clio    clio    clio/                   # agent clio's namespace (SGID)
+drwxrws---   codex   codex   codex/                  # agent codex's namespace (SGID)
 
 $ ls -la /var/bot/clio/
-drwxrws---   you   clio    .                       # namespace directory
--rw-r-----   clio  clio    env                     # environment file (0640)
--rw-r----r-- clio  clio    .zshrc                  # user shell startup configs
--rw-r----r-- clio  clio    .zprofile
+drwxrws---   clio   clio    .                       # namespace directory
+-rw-r----r-- clio   clio    .zshrc                  # user shell startup configs
+-rw-r----r-- clio   clio    .zprofile
 
 # Project shared with all agents via the bot group
 $ ls -la /path/to/project/
@@ -115,10 +114,12 @@ drwxrwx---   you   bot     .                       # owner rwx, group rwx, SGID
 
 ### How files are owned and accessed
 
-| Directory | New file owned by | Human access | Agent access |
-|---|---|---|---|
-| Bot Namespace `/var/bot/clio` | creator:`clio` | via group or `sudo` | via group |
-| Shared project (2770, SGID) | creator:`bot` | via `bot` group | via `bot` group |
+```console
+| Directory                     | New file owned by | Human access        | Agent access    |
+|-------------------------------|-------------------|---------------------|-----------------|
+| Bot Namespace `/var/bot/clio` | creator:`clio`    | via group or `sudo` | via group       |
+| Shared project (2770, SGID)   | creator:`bot`     | via `bot` group     | via `bot` group |
+```
 
 The SGID bit on the namespace directory and on shared projects ensures files
 inherit the directory's group regardless of who created them — no manual
