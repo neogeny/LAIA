@@ -1,11 +1,6 @@
 # Local Agent Isolation Architecture
 ## Multi-Agent Sandboxing via Headless UNIX Namespaces
 
-> **Platforms:** macOS — `laia.py` (dscl). Linux — `laia_linux.py`
-> (shadow-utils `groupadd`/`useradd`). The principles are identical; the
-> implementations differ because user and group management APIs are OS-native
-> and irreducibly platform-specific.
-
 This document describes a local isolation strategy designed to run autonomous
 agents inside strict, independent security boundaries. It leverages native UNIX
 user, group, and filesystem controls combined with a hardened, dynamic sudo
@@ -581,7 +576,12 @@ Operational gotchas and clarifications
 
 ---
 
-## Quick Start
+  ## Quick Start
+
+> **Platforms:** macOS — `laia.py` (dscl). Linux — `laia_linux.py`
+> (shadow-utils `groupadd`/`useradd`). The principles are identical; the
+> implementations differ because user and group management APIs are OS-native
+> and irreducibly platform-specific.
 
 These steps take you from zero to two collaborating agents in under a minute.
 
@@ -624,4 +624,3 @@ python3 src/laia.py run clio whoami   # prints: clio
 # 8. To stop sharing and remove the group (restores ownership to your primary group)
 sudo python3 src/laia.py noshare ~/laia-test
 ```
-
