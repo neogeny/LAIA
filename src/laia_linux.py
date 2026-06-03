@@ -766,24 +766,42 @@ def _ensure_oxtraverse(path, force=False):
     skip_owned = [d for d in missing if os.stat(d).st_uid != os.getuid()]
     changeable = [d for d in missing if os.stat(d).st_uid == os.getuid()]
     if force:
-        for d in changeable:
-            d.chmod(d.stat().st_mode | stat.S_IXOTH)
-            print(f"-> Added o+x to '{d}'.")
-        for d in skip_owned:
-            print(f"Warning: cannot change '{d}' (not owned by you).", file=sys.stderr)
+        for d in missing:
+            try:
+                d.chmod(d.stat().st_mode | stat.S_IXOTH)
+                print(f"-> Added o+x to '{d}'.")
+            except Exception:
+                print(f"Warning: cannot change '{d}' (permission denied or not owned).", file=sys.stderr)
         return
-    print("Warning: The bot needs o+x (world-traversable) on each directory along the\npath. These directories are missing it:\n")
+    print("Warning: The bot needs o+x (world-traversable) on each directory along the\npath.")
+    print("Directories missing o+x:")
     for d in missing:
         owner = " (not owned by you)" if os.stat(d).st_uid != os.getuid() else ""
         print(f"  {d}{owner}")
     print()
-    ans = input("Add o+x to these directories? [y/N]: ").strip().lower()
+    if changeable:
+        print("Will add o+x to the following directories (owned by you):")
+        for d in changeable:
+            print(f"  {d}")
+    if skip_owned:
+        print("Will attempt to add o+x to the following directories (not owned by you):")
+        for d in skip_owned:
+            print(f"  {d}")
+    print()
+    ans = input("Add o+x to the 'Will add' entries above and attempt to change the others? [y/N]: ").strip().lower()
     if ans == "y":
         for d in changeable:
-            d.chmod(d.stat().st_mode | stat.S_IXOTH)
-            print(f"-> Added o+x to '{d}'.")
+            try:
+                d.chmod(d.stat().st_mode | stat.S_IXOTH)
+                print(f"-> Added o+x to '{d}'.")
+            except Exception:
+                print(f"Warning: cannot change '{d}' (permission denied).", file=sys.stderr)
         for d in skip_owned:
-            print(f"Warning: cannot change '{d}' (not owned by you).", file=sys.stderr)
+            try:
+                d.chmod(d.stat().st_mode | stat.S_IXOTH)
+                print(f"-> Attempted to add o+x to '{d}'.")
+            except Exception:
+                print(f"Warning: cannot change '{d}' (permission denied).", file=sys.stderr)
 
 
 def cmdrun(args):
@@ -821,35 +839,59 @@ def cmdrun(args):
     if command:
         cmd = shutil.which(command[0], path=_stored_path)
         if cmd:
-            _ensure_oxtraverse(Path(cmd).parent, getattr(args, 'force', False))
+            cmd_path = Path(cmd)
+            # If it's a symlink, check the target as well
+            try:
+                if cmd_path.is_symlink():
+                    try:
+                        target = cmd_path.resolve()
+                        print(f"Note: '{cmd_path}' is a symlink to '{target}'")
+                    except Exception:
+                        target = cmd_path
+                    # Ensure traversal on both link's parent and target parent
+                    _ensure_oxtraverse(cmd_path.parent, getattr(args, 'force', False))
+                    _ensure_oxtraverse(target.parent, getattr(args, 'force', False))
+                    check_file = target
+                else:
+                    _ensure_oxtraverse(cmd_path.parent, getattr(args, 'force', False))
+                    check_file = cmd_path
+            except OSError:
+                check_file = Path(cmd)
+
             # Also ensure the command file itself is world-executable (o+x)
             try:
-                mode = os.stat(cmd).st_mode
+                mode = os.stat(check_file).st_mode
                 if not (mode & stat.S_IXOTH):
-                    owner_uid = os.stat(cmd).st_uid
+                    owner_uid = os.stat(check_file).st_uid
                     owned = (owner_uid == os.getuid())
                     if getattr(args, 'force', False):
                         if owned:
                             try:
-                                os.chmod(cmd, mode | stat.S_IXOTH)
-                                print(f"-> Added o+x to '{cmd}'.")
+                                os.chmod(check_file, mode | stat.S_IXOTH)
+                                print(f"-> Added o+x to '{check_file}'.")
                             except Exception:
-                                print(f"Warning: cannot change execute permission for '{cmd}'", file=sys.stderr)
+                                print(f"Warning: cannot change execute permission for '{check_file}'", file=sys.stderr)
                         else:
-                            print(f"Warning: cannot change '{cmd}' (not owned by you).", file=sys.stderr)
+                            print(f"Warning: cannot change '{check_file}' (not owned by you).", file=sys.stderr)
                     else:
                         owner_note = " (not owned by you)" if not owned else ""
-                        print(f"Warning: The command '{cmd}' is not world-executable{owner_note}.")
-                        ans = input(f"Add o+x to '{cmd}' to allow execution? [y/N]: ").strip().lower()
+                        print(f"Warning: The command '{check_file}' is not world-executable{owner_note}.")
+                        if owned:
+                            print("Will add o+x to the following file (owned by you):")
+                            print(f"  {check_file}")
+                        else:
+                            print("Cannot change (not owned by you):")
+                            print(f"  {check_file}")
+                        ans = input("Add o+x to the 'Will add' entries above? [y/N]: ").strip().lower()
                         if ans == 'y':
                             if owned:
                                 try:
-                                    os.chmod(cmd, mode | stat.S_IXOTH)
-                                    print(f"-> Added o+x to '{cmd}'.")
+                                    os.chmod(check_file, mode | stat.S_IXOTH)
+                                    print(f"-> Added o+x to '{check_file}'.")
                                 except Exception:
-                                    print(f"Warning: cannot change execute permission for '{cmd}'", file=sys.stderr)
+                                    print(f"Warning: cannot change execute permission for '{check_file}'", file=sys.stderr)
                             else:
-                                print(f"Warning: cannot change '{cmd}' (not owned by you).", file=sys.stderr)
+                                print(f"Warning: cannot change '{check_file}' (not owned by you).", file=sys.stderr)
             except OSError:
                 pass
 
