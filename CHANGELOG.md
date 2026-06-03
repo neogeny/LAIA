@@ -241,3 +241,18 @@ Open items:
 
 - Added AGENT_GUIDE.md: concise guidance for automated agents, including permitted actions, key commands, and important file locations. See AGENT_GUIDE.md for details.
 
+---
+
+## Session 4: Aligning and Consolidating LAIA.md Layout Design
+
+Date: 2026-06-03
+
+Summary:
+
+- Validated design documentation against current code implementations in macOS and Linux scripts.
+- Removed obsolete nested directory structures (`home/` and `work/`) under `/var/bot/<name>` in diagrams, instructions, and capability reference sections of `LAIA.md`.
+- Consolidated and cleaned up redundant duplicate "Quick Start" sections.
+- Added documentation for missing subcommands (`noshare`, `enable`, `update`, `shell`) in `LAIA.md`.
+- Regenerated `LAIA.txt` using `scripts/md2txt.py`.
+- Fixed a bug in `run` subcommand secure environment checks: implemented shebang/interpreter resolution lookup that recursively checks and resolves command scripts and symlinks. The script now collects all directory traversal (o+x) and file executable (o+x) changes required, presents a unified confirmation query listing all changes before executing them, attempts modifications, and reports any specific paths that failed with manual remediation instructions.
+

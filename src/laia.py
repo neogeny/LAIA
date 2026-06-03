@@ -884,13 +884,20 @@ def _ensure_oxtraverse(path, force=False):
         return
     skip_owned = [d for d in missing if os.stat(d).st_uid != os.getuid()]
     changeable = [d for d in missing if os.stat(d).st_uid == os.getuid()]
+    failed = []
     if force:
         for d in missing:
             try:
                 d.chmod(d.stat().st_mode | stat.S_IXOTH)
                 print(f"-> Added o+x to '{d}'.")
             except Exception:
-                print(f"Warning: cannot change '{d}' (permission denied or not owned).", file=sys.stderr)
+                failed.append(d)
+        if failed:
+            print("Error: The following directories are still not traversable (chmod failed):", file=sys.stderr)
+            for d in failed:
+                print(f"  {d}", file=sys.stderr)
+            print("Please fix permissions manually (e.g. run: chmod o+x <dir>).", file=sys.stderr)
+            sys.exit(1)
         return
 
     # Interactive, detailed prompt listing which directories would be changed
@@ -916,13 +923,22 @@ def _ensure_oxtraverse(path, force=False):
                 d.chmod(d.stat().st_mode | stat.S_IXOTH)
                 print(f"-> Added o+x to '{d}'.")
             except Exception:
-                print(f"Warning: cannot change '{d}' (permission denied).", file=sys.stderr)
+                failed.append(d)
         for d in skip_owned:
             try:
                 d.chmod(d.stat().st_mode | stat.S_IXOTH)
                 print(f"-> Attempted to add o+x to '{d}'.")
             except Exception:
-                print(f"Warning: cannot change '{d}' (permission denied).", file=sys.stderr)
+                failed.append(d)
+        if failed:
+            print("Error: The following directories are still not traversable (chmod failed):", file=sys.stderr)
+            for d in failed:
+                print(f"  {d}", file=sys.stderr)
+            print("Please fix permissions manually (e.g. run: chmod o+x <dir>).", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print("Error: Sandbox execution aborted because missing traversal permissions were not resolved.", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmdrun(args):
@@ -960,61 +976,134 @@ def cmdrun(args):
     if command:
         cmd = shutil.which(command[0], path=_stored_path)
         if cmd:
-            cmd_path = Path(cmd)
-            # If it's a symlink, check the target as well
-            try:
-                if cmd_path.is_symlink():
-                    try:
-                        target = cmd_path.resolve()
-                        print(f"Note: '{cmd_path}' is a symlink to '{target}'")
-                    except Exception:
-                        target = cmd_path
-                    # Ensure traversal on both link's parent and target parent
-                    _ensure_oxtraverse(cmd_path.parent, getattr(args, 'force', False))
-                    _ensure_oxtraverse(target.parent, getattr(args, 'force', False))
-                    check_file = target
-                else:
-                    _ensure_oxtraverse(cmd_path.parent, getattr(args, 'force', False))
-                    check_file = cmd_path
-            except OSError:
-                check_file = Path(cmd)
+            # We want to identify ALL files and directories that require traversal (o+x) or execute (o+x) permissions,
+            # including resolved symlinks and parsed shebang script interpreters (like #!/usr/bin/env node)
+            files_to_chmod = []
+            dirs_to_chmod = []
+            checked_paths = set()
 
-            # Also ensure the command file itself is world-executable (o+x)
-            try:
-                mode = os.stat(check_file).st_mode
-                if not (mode & stat.S_IXOTH):
-                    owner_uid = os.stat(check_file).st_uid
-                    owned = (owner_uid == os.getuid())
-                    if getattr(args, 'force', False):
-                        if owned:
-                            try:
-                                os.chmod(check_file, mode | stat.S_IXOTH)
-                                print(f"-> Added o+x to '{check_file}'.")
-                            except Exception:
-                                print(f"Warning: cannot change execute permission for '{check_file}'", file=sys.stderr)
-                        else:
-                            print(f"Warning: cannot change '{check_file}' (not owned by you).", file=sys.stderr)
-                    else:
-                        owner_note = " (not owned by you)" if not owned else ""
-                        print(f"Warning: The command '{check_file}' is not world-executable{owner_note}.")
-                        if owned:
-                            print("Will add o+x to the following file (owned by you):")
-                            print(f"  {check_file}")
-                        else:
-                            print("Cannot change (not owned by you):")
-                            print(f"  {check_file}")
-                        ans = input("Add o+x to the 'Will add' entries above? [y/N]: ").strip().lower()
-                        if ans == 'y':
-                            if owned:
-                                try:
-                                    os.chmod(check_file, mode | stat.S_IXOTH)
-                                    print(f"-> Added o+x to '{check_file}'.")
-                                except Exception:
-                                    print(f"Warning: cannot change execute permission for '{check_file}'", file=sys.stderr)
-                            else:
-                                print(f"Warning: cannot change '{check_file}' (not owned by you).", file=sys.stderr)
-            except OSError:
-                pass
+            def process_command_path(p):
+                p = Path(p).absolute()
+                if p in checked_paths:
+                    return
+                checked_paths.add(p)
+
+                # Collect ancestor directories for traversal check
+                ancestors = [p.parent]
+                ancestors.extend(p.parent.parents)
+                for d in ancestors:
+                    try:
+                        mode = os.stat(d).st_mode
+                        if not (mode & stat.S_IXOTH):
+                            if d not in dirs_to_chmod:
+                                dirs_to_chmod.append(d)
+                    except OSError:
+                        pass
+
+                # Check executable permissions on the command file
+                try:
+                    mode = os.stat(p).st_mode
+                    if not (mode & stat.S_IXOTH):
+                        if p not in files_to_chmod:
+                            files_to_chmod.append(p)
+                except OSError:
+                    pass
+
+                # Resolve symlinks recursively
+                if p.is_symlink():
+                    try:
+                        target = p.resolve()
+                        print(f"Note: '{p}' is a symlink to '{target}'")
+                        process_command_path(target)
+                    except Exception:
+                        pass
+                elif p.is_file():
+                    # Parse shebang/hashbang interpreters
+                    try:
+                        with p.open("rb") as f:
+                            first_line = f.readline(1024)
+                            if first_line.startswith(b"#!"):
+                                shebang = first_line[2:].decode("utf-8", errors="ignore").strip()
+                                parts = shebang.split()
+                                if parts:
+                                    interpreter = parts[0]
+                                    # If it uses env (e.g. #!/usr/bin/env node)
+                                    if interpreter == "/usr/bin/env" or interpreter.endswith("/env"):
+                                        if len(parts) > 1:
+                                            # Find the executable in the bot's PATH
+                                            env_cmd = shutil.which(parts[1], path=_stored_path)
+                                            if env_cmd:
+                                                print(f"Note: '{p}' shebang requests env lookup for '{parts[1]}' (resolved to '{env_cmd}')")
+                                                process_command_path(env_cmd)
+                                    else:
+                                        # Direct path to interpreter (e.g. #!/usr/bin/python3)
+                                        interpreter_cmd = shutil.which(interpreter, path=_stored_path)
+                                        if interpreter_cmd:
+                                            print(f"Note: '{p}' shebang requests interpreter '{interpreter_cmd}'")
+                                            process_command_path(interpreter_cmd)
+                    except Exception:
+                        pass
+
+            process_command_path(cmd)
+
+            if dirs_to_chmod or files_to_chmod:
+                # Present a unified, clear preview of all changes required
+                print("Warning: The bot requires world-executable/traversable (o+x) permissions on the following paths:")
+                
+                changeable_dirs = [d for d in dirs_to_chmod if os.stat(d).st_uid == os.getuid()]
+                unowned_dirs = [d for d in dirs_to_chmod if os.stat(d).st_uid != os.getuid()]
+                changeable_files = [f for f in files_to_chmod if os.stat(f).st_uid == os.getuid()]
+                unowned_files = [f for f in files_to_chmod if os.stat(f).st_uid != os.getuid()]
+
+                if changeable_dirs:
+                    print("Will add traversal (o+x) to these directories (owned by you):")
+                    for d in changeable_dirs:
+                        print(f"  {d}")
+                if unowned_dirs:
+                    print("Will attempt traversal (o+x) on these directories (not owned by you):")
+                    for d in unowned_dirs:
+                        print(f"  {d}")
+                if changeable_files:
+                    print("Will add execute (o+x) to these files (owned by you):")
+                    for f in changeable_files:
+                        print(f"  {f}")
+                if unowned_files:
+                    print("Will attempt execute (o+x) on these files (not owned by you):")
+                    for f in unowned_files:
+                        print(f"  {f}")
+
+                proceed = False
+                if getattr(args, 'force', False):
+                    proceed = True
+                    print("Force flag set. Attempting permission changes automatically.")
+                else:
+                    ans = input("\nProceed with all permission updates shown above? [y/N]: ").strip().lower()
+                    if ans in ("y", "yes"):
+                        proceed = True
+
+                if proceed:
+                    failed = []
+                    for d in dirs_to_chmod:
+                        try:
+                            d.chmod(d.stat().st_mode | stat.S_IXOTH)
+                            print(f"-> Traversal (o+x) added to '{d}'.")
+                        except Exception:
+                            failed.append(d)
+                    for f in files_to_chmod:
+                        try:
+                            os.chmod(f, os.stat(f).st_mode | stat.S_IXOTH)
+                            print(f"-> Execute (o+x) added to '{f}'.")
+                        except Exception:
+                            failed.append(f)
+                    if failed:
+                        print("\nError: The following files or directories could not be modified (permission denied):", file=sys.stderr)
+                        for item in failed:
+                            print(f"  {item}", file=sys.stderr)
+                        print("Please fix permissions manually (e.g. run: chmod o+x <path>).", file=sys.stderr)
+                        sys.exit(1)
+                else:
+                    print("Error: Sandbox execution aborted because missing traversal/execute permissions were not resolved.", file=sys.stderr)
+                    sys.exit(1)
 
     envargs = [
         f"HOME={bothome}",
@@ -1037,6 +1126,10 @@ def cmdrun(args):
         result = subprocess.run(sudocmd, check=True)
         sys.exit(result.returncode)
     except subprocess.CalledProcessError as err:
+        if err.returncode == 127:
+            print("\nWarning: Command returned exit code 127. This usually indicates that the binary, the shebang interpreter, or one of their shared library dependencies (.dylib, .so) was not found or could not be loaded due to permission restrictions.", file=sys.stderr)
+        else:
+            print(f"\nWarning: Command execution failed with exit code {err.returncode}. If the binary depends on shared libraries (e.g. under /opt/homebrew or /usr/local/lib), ensure those directories and libraries also grant read and traversal (o+rx) permissions to the bot user.", file=sys.stderr)
         sys.exit(err.returncode)
     except KeyboardInterrupt:
         sys.exit(130)

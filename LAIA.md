@@ -36,7 +36,7 @@ sudo python3 src/laia.py create codex
 
 # 3. Share your project directory with all agents (default group 'bot')
 mkdir -p ~/laia-test
-sudo python3 src/laia.py share --path ~/laia-test
+sudo python3 src/laia.py share ~/laia-test
 
 # 4. Have each party create a file
 echo "hello from human" > ~/laia-test/human.txt
@@ -47,15 +47,15 @@ cd /tmp && sudo -u codex sh -c 'echo "hello from codex" > ~/laia-test/codex.txt'
 cat ~/laia-test/clio.txt
 cat ~/laia-test/codex.txt
 
-# 6. Verify cross-agent isolation (clio cannot access codex's workdir)
-sudo -u clio ls /var/bot/codex/work
-# should print: ls: .: Operation not permitted
+# 6. Verify cross-agent isolation (clio cannot access codex's workspace)
+sudo -u clio ls /var/bot/codex
+# should print permission denied / Operation not permitted
 
 # 7. Run a command inside clio's sandbox
 python3 src/laia.py run clio whoami   # prints: clio
 
 # 8. To stop sharing and remove the group (restores ownership to your primary group)
-sudo python3 src/laia.py noshare --group bot --path ~/laia-test
+sudo python3 src/laia.py noshare ~/laia-test
 ```
 
 ---
@@ -91,16 +91,14 @@ Linux.
 
 | Action | Result | Why |
 |---|---|---|
-| Write to own `work/` | ✓ Allowed | SGID 2770, agent owns its group |
-| Write to own `home/` | ✓ Allowed | 0700 owned by agent |
+| Write to own namespace `/var/bot/clio` | ✓ Allowed | SGID 2770, agent group |
 | Write to shared project (`bot` group) | ✓ Allowed | Member of `bot` group |
 | Write to `/tmp/` | ✓ Allowed | World-writable (sticky bit) |
 | Write to `/opt/homebrew/` (brew) | ✗ Blocked | Owned by `root:admin` |
 | Write to `/usr/local/` (brew, npm -g) | ✗ Blocked | Owned by `root:wheel` |
 | Read human's `~/.ssh/` | ✗ Blocked | 0700 owned by human |
 | Read human's `~/.aws/` | ✗ Blocked | 0700 owned by human |
-| Read another agent's `work/` | ✗ Blocked | Separate UNIX group |
-| Read another agent's `home/` | ✗ Blocked | 0700, different owner |
+| Read another agent's `/var/bot/codex` | ✗ Blocked | Separate UNIX group, 2770 |
 | Escalate via `sudo` | ✗ Blocked | Agent user not in sudoers |
 | Send network requests | ✓ Allowed | No egress restrictions |
 | Read inherited environment vars | ✗ Blocked | `env -i` strips everything |
@@ -113,7 +111,8 @@ The three most relevant real-world consequences:
   password, which the human must provide interactively.
 
 - **`npm install -g`** — fails for the same reason. Per-project
-  `npm install` (without `-g`) works fine inside `work/` or a shared project.
+  `npm install` (without `-g`) works fine inside a shared project or agent
+  namespace directory.
 
 - **Credential exfiltration** — the agent has no access to `~/.ssh/`,
   `~/.aws/`, `~/.config/git/`, or any other sensitive path owned by the
@@ -124,8 +123,8 @@ The three most relevant real-world consequences:
 ## 2. Architecture: Headless Namespaces
 
 Each agent gets its own lightweight, templated layout under `/var/bot`. The
-structure provides a system **User**, **Group**, **Home**, and shared
-**Work** directory — nothing more.
+structure provides a system **User**, **Group**, and namespace **Workspace**
+directory — nothing more.
 
 ```
                     /var/bot/ (0755 root:root)
@@ -134,10 +133,8 @@ structure provides a system **User**, **Group**, **Home**, and shared
         ▼                               ▼
 
 /var/bot/clio/                    /var/bot/codex/
-Owner: clio:clio                  Owner: codex:codex
-Single-directory namespace: each agent uses /var/bot/<name> as its authoritative workspace.
-HOME, configuration files, and work files all live under the single namespace directory.
-The namespace directory is typically set with SGID and the permissions described below.
+Owner: you:clio                   Owner: you:codex
+Permissions: 2770 (SGID)          Permissions: 2770 (SGID)
 ```
 
 By assigning a dedicated, unique system group to each agent (e.g., group `clio`
@@ -151,16 +148,18 @@ Here is the full permission scheme in practice:
 # Sandbox infrastructure — each agent isolated by its own group
 $ ls -la /var/bot/
 drwxr-xr-x   root  root    .                       # world-traversable
-drwxr-x---   you   clio    clio/                   # agent clio's namespace
-drwxr-x---   you   codex   codex/                  # agent codex's namespace
+drwxrws---   you   clio    clio/                   # agent clio's namespace (SGID)
+drwxrws---   you   codex   codex/                  # agent codex's namespace (SGID)
 
 $ ls -la /var/bot/clio/
-drwxrws---   you   clio    clio/                   # single-directory namespace (SGID set)
-# The namespace contains configuration and data: /var/bot/clio (HOME and WORK inside)
+drwxrws---   you   clio    .                       # namespace directory
+-rw-r-----   clio  clio    env                     # environment file (0640)
+-rw-r----r-- clio  clio    .zshrc                  # user shell startup configs
+-rw-r----r-- clio  clio    .zprofile
 
 # Project shared with all agents via the bot group
 $ ls -la /path/to/project/
-drwxrwx---   you   bot     .                       # owner rwx, group rwx
+drwxrwx---   you   bot     .                       # owner rwx, group rwx, SGID
 -rw-rw----   you   bot     README.md               # owner rw, group rw
 -rw-rw----   you   bot     main.py
 ```
@@ -169,13 +168,12 @@ drwxrwx---   you   bot     .                       # owner rwx, group rwx
 
 | Directory | New file owned by | Human access | Agent access |
 |---|---|---|---|
-| `home/` (0700) | `clio:clio` | `sudo` only | `clio` only |
-| `work/` (2770, SGID) | creator:`clio` | via group or `sudo` | via group |
+| Bot Namespace `/var/bot/clio` | creator:`clio` | via group or `sudo` | via group |
 | Shared project (2770, SGID) | creator:`bot` | via `bot` group | via `bot` group |
 
-The SGID bit on `work/` and on shared projects ensures files inherit the
-directory's group regardless of who created them — no manual `chgrp` after
-every edit.
+The SGID bit on the namespace directory and on shared projects ensures files
+inherit the directory's group regardless of who created them — no manual
+`chgrp` after every edit.
 
 ### What you need to join
 
@@ -199,9 +197,10 @@ sudo python3 src/laia.py share ~/my-project
 ```
 
 This sets the group to `bot`, applies SGID (`g+rwxs`) so new files inherit the
-group, and warns about sensitive entries (`.git/`, `.env`, `.aws/`) that would
-become agent-readable. Use `--recursive` (`-r`) to also fix existing files.
-Pass `--dry-run` (`-n`) to preview changes without touching the filesystem.
+`bot` group, and warns about sensitive entries (`.git/`, `.env`, `.aws/`) that
+would become agent-readable. Use `--recursive` (`-r`) to also fix existing
+files. Pass `--dry-run` (`-n`) to preview changes without touching the
+filesystem.
 
 If you prefer to set it up manually:
 
@@ -210,7 +209,7 @@ sudo chgrp bot ~/my-project
 sudo chmod g+rwxs ~/my-project
 ```
 
-For an agent's `work/` directory, you have two choices:
+For an agent's namespace directory, you have two choices:
 
 - **Join the agent's group** — gives you direct read/write access to
   agent-created files without `sudo`:
@@ -223,14 +222,13 @@ For an agent's `work/` directory, you have two choices:
 - **Use `sudo` or `botadm run`** — read agent output by running commands as
   the agent:
   ```bash
-  sudo -u clio cat /var/bot/clio/work/output.txt
-  botadm run clio cat /var/bot/clio/work/output.txt
+  sudo -u clio cat /var/bot/clio/output.txt
+  botadm run clio cat /var/bot/clio/output.txt
   ```
 
 Joining an agent's group does not reduce security — you already have root
 access via `sudo`. The real isolation boundary is between agents, and that
-remains intact: `codex` is not in group `clio` and cannot access `clio`'s
-files.
+remains intact: `codex` is not in group `clio` and cannot access `clio`'s files.
 
 ---
 
@@ -249,8 +247,8 @@ export BOT="clio"
 sudo groupadd "$BOT"
 sudo useradd --system \
              --gid "$BOT" \
-             --home-dir "/var/bot/$BOT/home" \
-             --create-home \
+             --home-dir "/var/bot/$BOT" \
+             --no-create-home \
              --shell /usr/sbin/nologin \
              "$BOT"
 ```
@@ -268,7 +266,7 @@ sudo dscl . -create /Groups/"$BOT" Password "*"
 sudo dscl . -create /Users/"$BOT"
 sudo dscl . -create /Users/"$BOT" UniqueID 450
 sudo dscl . -create /Users/"$BOT" PrimaryGroupID 450
-sudo dscl . -create /Users/"$BOT" NFSHomeDirectory "/var/bot/$BOT/home"
+sudo dscl . -create /Users/"$BOT" NFSHomeDirectory "/var/bot/$BOT"
 sudo dscl . -create /Users/"$BOT" UserShell /usr/bin/false
 sudo dscl . -create /Users/"$BOT" RealName "Agent: $BOT"
 sudo dscl . -create /Users/"$BOT" Password "*"
@@ -290,24 +288,20 @@ sudo dscl . -create /Groups/bot PrimaryGroupID 440
 sudo dscl . -create /Groups/bot Password "*"
 ```
 
-Then set up the workspace hierarchy. The SGID bit on `work/` is the key
+Then set up the namespace hierarchy. The SGID bit on the directory is the key
 mechanism: files created by either party inherit the bot's group, so explicit
 `chown` after every operation is unnecessary.
 
 ```bash
-# Create the workspace and home hierarchy
-sudo mkdir -p "/var/bot/$BOT/work"
+# Create the workspace namespace directory
+sudo mkdir -p "/var/bot/$BOT"
 
 # You own the workspace; the agent's group has collaborative access
-sudo chown -R $USER:"$BOT" "/var/bot/$BOT/work"
+sudo chown -R $USER:"$BOT" "/var/bot/$BOT"
 
 #  2 = SGID — new files inherit the $BOT group
 # 770 = rwx for you and the bot, zero for everyone else
-sudo chmod 2770 "/var/bot/$BOT/work"
-
-# Lock down the agent's private home directory
-sudo chmod 700 "/var/bot/$BOT/home"
-sudo chown "$BOT":"$BOT" "/var/bot/$BOT/home"
+sudo chmod 2770 "/var/bot/$BOT"
 ```
 
 ### Step 3: Configure Sudo Rules
@@ -338,9 +332,9 @@ the project:
 | `src/laia.py` | macOS | `dscl` (Directory Service command line) |
 | `src/laia_linux.py` | Linux | `groupadd`, `useradd`, `groupdel`, `userdel` |
 
-Both expose the same interface (`init`, `create`, `disable`, `destroy`,
-`share`, `run`) and share the same architectural principles. Only the
-system-level CRUD operations differ.
+Both expose the same interface (`init`, `create`, `update`, `shell`, `disable`,
+`enable`, `destroy`, `share`, `noshare`, `run`) and share the same
+architectural principles. Only the system-level CRUD operations differ.
 
 ### System Configuration Lifecycle
 
@@ -351,7 +345,7 @@ Initializes the root namespace at `/var/bot` with strict ownership
 that all agents will belong to as a supplementary group. Must be run once
 before any other command.
 
-#### `botadm create [--no-sudoers]`
+#### `botadm create [--no-sudoers] [--force]`
 
 Provisions a new bot namespace:
 
@@ -359,15 +353,30 @@ Provisions a new bot namespace:
    `/usr/sbin/nologin` on Linux, `/usr/bin/false` on macOS).
 2. Adds the agent user to the shared supplementary group `bot` for
    cross-agent project collaboration.
-3. Creates the agent's home directory (`0700`, permission-locked) and
-   collaborative workspace (`2770` with SGID).
-4. Assigns workspace ownership to the invoking (sudo) user and the bot's
+3. Creates the agent's single-directory namespace workspace (`2770` with SGID).
+4. Assigns namespace ownership to the invoking (sudo) user and the bot's
    group.
-5. By default, writes a validated sudoers drop-in to
+5. Writes the `.zshrc`/`.zprofile` (macOS) or `.bashrc`/`.profile` (Linux) with
+   custom colored prompts and fallback PS1 settings.
+6. Saves default environment file (`/var/bot/<name>/env`) and changes ownership
+   to the bot user.
+7. By default, writes a validated sudoers drop-in to
    `/etc/sudoers.d/bot-<name>`. Pass `--no-sudoers` to skip.
 
 On failure, all partially-created resources (group, user, directories) are
 rolled back automatically.
+
+#### `botadm update <bot>`
+
+Refreshes configuration files, dotfiles, prompts, and environment definitions for
+an existing namespace. Attempts to update the system user's login shell and
+resets permissions. Does not edit the sudoers drop-in rules.
+
+#### `botadm shell <bot> [--shell zsh|bash]`
+
+Launches a login interactive shell inside the bot's namespace sandbox, ensuring
+login init files (`.zprofile`/`.profile`) and environment configurations are
+properly read.
 
 #### `botadm disable`
 
@@ -380,16 +389,22 @@ Reversibly quarantines a bot:
 - Both platforms: masks all namespace directories with `0000` permissions.
 
 The sudoers rule and directory contents are preserved, allowing the bot to be
-re-enabled later by restoring permissions and unlocking the account.
+re-enabled later (via `botadm enable`) by restoring permissions and unlocking
+the account.
 
-#### `botadm destroy [--no-sudoers]`
+#### `botadm enable`
+
+Reverses `disable` quarantine: unlocks the password login database records, and
+restores directory permissions back to `2770` with SGID.
+
+#### `botadm destroy [--no-sudoers] [--force]`
 
 Permanently removes a bot:
 
 - Deletes the sudoers drop-in (unless `--no-sudoers` is given).
 - Removes the system user (`userdel -r` on Linux; `dscl . -delete` on macOS).
 - Removes the system group (`groupdel` on Linux; `dscl . -delete` on macOS).
-- Deletes the entire namespace tree under `/var/bot/<name>`.
+- Deletes the entire namespace directory under `/var/bot/<name>`.
 
 **This operation is irreversible.**
 
@@ -407,6 +422,14 @@ Shares an existing directory with all agents:
 The directory must not be a system path (`/etc`, `/usr`, `/var`, etc.).
 Requires `init` to have been run first.
 
+#### `botadm noshare [--group <group>] [--dry-run] <path>`
+
+Stops sharing a directory with the agents:
+- Restores group ownership to the human user's primary login group.
+- Removes the SGID bit (`g-s`) and removes write permissions for group/others on
+  the target path.
+- Supports `--recursive` and `--dry-run`.
+
 ### Sandboxed Execution Context
 
 #### `botadm run <bot> <command...>`
@@ -415,53 +438,13 @@ Executes a command inside the bot's sandbox:
 
 1. **Clears the environment** — `env -i` strips all inherited variables.
 2. **Sets a minimal whitelist** — only `HOME`, `USER`, `LOGNAME`, `PATH`,
-   `TERM`, and `PWD` are defined, all pointing inside the sandbox.
+   `TERM`, and `PWD` are defined, all pointing inside the sandbox namespace.
 3. **Applies `umask 007`** — files created are group-readable/writable but
    world-inaccessible.
 4. **Drops privileges** — delegates to the target bot user via `sudo -u`
-   (not `sudo -i`, because the bot's shell is `nologin`).
+   (not `sudo -i`, because the bot's shell is `nologin`/`false`).
 
 ---
-
-## Quick Start
-
-These steps take you from zero to two collaborating agents in under a minute.
-
-```bash
-# 1. Initialize the sandbox root
-sudo python3 src/laia.py init
-
-# 2. Create two agents
-sudo python3 src/laia.py create clio
-sudo python3 src/laia.py create codex
-
-# 3. Add yourself to the shared bot group
-# macOS
-sudo dseditgroup -o edit -a $USER -t user bot
-# Linux
-# sudo usermod -aG bot $USER
-
-# 4. Share your project directory with all agents
-mkdir -p ~/laia-test
-sudo python3 src/laia.py share ~/laia-test
-
-# 5. Have each party create a file
-echo "hello from human" > ~/laia-test/human.txt
-cd /tmp && sudo -u clio   sh -c 'echo "hello from clio"  > ~/laia-test/clio.txt'
-cd /tmp && sudo -u codex  sh -c 'echo "hello from codex" > ~/laia-test/codex.txt'
-
-# 6. Verify everyone can read everything
-cat ~/laia-test/clio.txt
-cat ~/laia-test/codex.txt
-
-# 7. Verify cross-agent isolation (clio cannot access codex's workdir)
-sudo -u clio ls /var/bot/codex/work
-# should print: ls: .: Operation not permitted
-
-# 8. Run a command inside clio's sandbox
-python3 src/laia.py run clio whoami   # prints: clio
-```
-
 
 ## 5. Design Decisions
 
@@ -505,15 +488,16 @@ Drop-in files must be owned by `root:root` with `0440` permissions;
 `visudo -cf` before considering the rule active.
 
 **`sudo -u` Not `sudo -i`**  
-The agent's shell is `/usr/sbin/nologin`, which rejects interactive login. Using
-`sudo -i` would invoke `nologin` and fail immediately. `sudo -u` bypasses the
-login shell entirely and delegates environment control to `env -i`.
+The agent's shell is `/usr/sbin/nologin` or `/usr/bin/false`, which rejects
+interactive login. Using `sudo -i` would invoke the login shell and fail
+immediately. `sudo -u` bypasses the login shell entirely and delegates
+environment control to `env -i`.
 
 **Disable vs Destroy**  
 These are semantically distinct. `disable` is a reversible quarantine — the
-account is locked, permissions stripped, but data and sudoers rule preserved.
-`destroy` is permanent teardown — user, group, data, and sudoers are all
-removed. This separation lets you suspend an agent without losing state.
+account is locked, permissions stripped to `0000`, but data and sudoers rule
+preserved. `destroy` is permanent teardown — user, group, data, and sudoers are
+all removed. This separation lets you suspend an agent without losing state.
 
 **Rollback Safety**  
 Provisioning is multi-step (group → user → directories → permissions →
@@ -563,35 +547,38 @@ wrap `botadm run` with `unshare -n` and `iptables`/`nftables` rules, or use
 intentionally irreversible — the namespace, user, group, and sudoers rule are
 all removed in one operation.
 
+---
+
 ## 7. Recent Implementation Notes
 
 The implementation in src/laia.py and src/laia_linux.py has been updated to
 reflect the following operational decisions and features:
 
-- Single-directory namespace: /var/bot/<name> is now the authoritative layout for both platforms.
-- AGENT_ENV dict provides defaults (HISTFILE, EDITOR) and is persisted to
-  /var/bot/<name>/env.
-- env file ownership: update now attempts to chown the env file to the agent
+- Single-directory namespace: `/var/bot/<name>` is now the authoritative layout for
+  both platforms. There are no sub-nested `home/` and `work/` subfolders.
+- `AGENT_ENV` dict provides defaults (`HISTFILE`, `EDITOR`) and is persisted to
+  `/var/bot/<name>/env`.
+- env file ownership: `update` now attempts to chown the env file to the agent
   user (best-effort) so the agent can manage its live environment.
-- macOS default shell: zsh for agents; Linux: bash. The update subcommand
+- macOS default shell: `zsh` for agents; Linux: `bash`. The `update` subcommand
   attempts to set the system user's login shell (best-effort) and emits a
   warning if it cannot.
-- create/update now write standard user dotfiles (.zprofile/.zshrc on macOS,
-  .profile/.bashrc on Linux) including a colored prompt and a PS1 fallback for
+- `create`/`update` now write standard user dotfiles (`.zprofile`/`.zshrc` on macOS,
+  `.profile`/`.bashrc` on Linux) including a colored prompt and a PS1 fallback for
   programs that expect it.
-- The create and destroy commands support --force / -f to skip interactive
+- The `create` and `destroy` commands support `--force` / `-f` to skip interactive
   prompts.
-- The shell subcommand launches a login interactive shell (exec {shell} -l -i),
-  so HOME and login init files are applied correctly.
+- The `shell` subcommand launches a login interactive shell (`exec {shell} -l -i`),
+  so `HOME` and login init files are applied correctly.
 
 Smoke-test checklist (recommended):
 
-1. sudo python3 src/laia.py create testbot
-2. sudo python3 src/laia.py update testbot
-3. sudo python3 src/laia.py shell testbot    # verify HOME, PROMPT, PS1
-4. sudo python3 src/laia.py disable testbot  # verify account locked and perms 0000
-5. sudo python3 src/laia.py enable testbot   # verify account unlocked and perms restored
-6. sudo python3 src/laia.py destroy testbot  # confirm deletion (use --force to skip confirmation)
+1. `sudo python3 src/laia.py create testbot`
+2. `sudo python3 src/laia.py update testbot`
+3. `sudo python3 src/laia.py shell testbot`    # verify HOME, PROMPT, PS1
+4. `sudo python3 src/laia.py disable testbot`  # verify account locked and perms 0000
+5. `sudo python3 src/laia.py enable testbot`   # verify account unlocked and perms restored
+6. `sudo python3 src/laia.py destroy testbot`  # confirm deletion (use --force to skip confirmation)
 
 These changes are backward-compatible with the previous layout and preserve the
 security model described in this document.
@@ -630,4 +617,11 @@ Operational gotchas and clarifications
 - visudo validation: The sudoers drop-in is validated with `visudo -cf` and
   removed if invalid. If you maintain sudoers centrally, use `--no-sudoers`
   during create and add your rule through your change-control process.
+
+- Shared library dependencies: If a sandboxed command relies on dynamic libraries
+  (such as `.dylib` files on macOS or `.so` files on Linux, e.g. Node.js binary
+  dependencies), those runtime libraries and their parent paths must also grant
+  world-readable and traversal (`o+rx`) permissions. If they are blocked, the OS
+  loader will raise a permission denied (e.g. dyld library loading failed) or a
+  missing command error.
 
