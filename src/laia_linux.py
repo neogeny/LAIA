@@ -429,7 +429,9 @@ def cmdupdate(args):
     os.chown(str(profile), botuid, botgid)
 
     bashrc = botdir / ".bashrc"
-    bashrc.write_text('[[ -f /etc/bash.bashrc ]] && source /etc/bash.bashrc\n')
+    bashrc_contents = '[[ -f /etc/bash.bashrc ]] && source /etc/bash.bashrc\n'
+    bashrc_contents += "PS1='\\[\\e[1;32m\\]\\u@{bot}\\[\\e[0m\\]:\\[\\e[1;34m\\]\\w\\[\\e[0m\\]\\$ '\n"
+    bashrc.write_text(bashrc_contents)
     bashrc.chmod(0o644)
     os.chown(str(bashrc), botuid, botgid)
 
@@ -759,6 +761,11 @@ def cmdrun(args):
         print(f"Error: Sandbox '{botroot}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = str(botwork)
+
     _laia_env = botroot / "env"
     if _laia_env.exists():
         content = _laia_env.read_text()
@@ -779,14 +786,14 @@ def cmdrun(args):
         f"LOGNAME={bot}",
         f"PATH={_stored_path}",
         "TERM=xterm-256color",
-        f"PWD={botwork}",
+        f"PWD={cwd}",
         f"PS1=\\[\\033[1;32m\\]\\u@{bot}\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
     ]
 
     sudocmd = [
         "sudo", "-u", bot,
         "env", "-i", *envargs,
-        "bash", "-c", f"cd '{botwork}' && umask 007 && exec \"$@\"",
+        "bash", "-c", f"cd '{cwd}' && umask 007 && exec \"$@\"",
         "--", *command,
     ]
 
@@ -812,6 +819,11 @@ def cmdshell(args):
         print(f"Error: Sandbox '{botroot}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = str(botwork)
+
     _laia_env = botroot / "env"
     if _laia_env.exists():
         content = _laia_env.read_text()
@@ -832,14 +844,14 @@ def cmdshell(args):
         f"LOGNAME={bot}",
         f"PATH={_stored_path}",
         "TERM=xterm-256color",
-        f"PWD={botwork}",
+        f"PWD={cwd}",
         f"PS1=\\[\\e[1;32m\\]\\u@{bot}\\[\\e[0m\\]:\\[\\e[1;34m\\]\\w\\[\\e[0m\\]\\$ ",
     ]
 
     sudocmd = [
         "sudo", "-u", bot,
         "env", "-i", *envargs,
-        shell, "-c", f"cd '{botwork}' && exec {shell} -l -i",
+        shell, "-c", f"cd '{cwd}' && exec {shell} -l -i",
     ]
 
     try:

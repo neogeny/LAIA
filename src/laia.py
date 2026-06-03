@@ -389,7 +389,7 @@ def cmdcreate(args):
         zshrc_contents = '[[ -f /etc/zshrc ]] && source /etc/zshrc\n'
         zshrc_contents += "PROMPT='%F{green}%n@%m%f:%F{blue}%~%f$ '\n"
         zshrc_contents += "# Fallback for programs expecting PS1\n"
-        zshrc_contents += "export PS1=\"$(print -P '%F{green}%n@%m%f:%F{blue}%~%f$ ')\"\n"
+        zshrc_contents += "PS1='%F{green}%n@%m%f:%F{blue}%~%f$ '\n"
         zshrc.write_text(zshrc_contents)
         zshrc.chmod(0o644)
         os.chown(str(zshrc), botuid, botgid)
@@ -483,7 +483,7 @@ def cmdupdate(args):
     zshrc_contents = '[[ -f /etc/zshrc ]] && source /etc/zshrc\n'
     zshrc_contents += "PROMPT='%F{green}%n@%m%f:%F{blue}%~%f$ '\n"
     zshrc_contents += "# Fallback for programs expecting PS1\n"
-    zshrc_contents += "export PS1=\"$(print -P '%F{green}%n@%m%f:%F{blue}%~%f$ ')\"\n"
+    zshrc_contents += "PS1='%F{green}%n@%m%f:%F{blue}%~%f$ '\n"
     zshrc.write_text(zshrc_contents)
     zshrc.chmod(0o644)
     os.chown(str(zshrc), botuid, botgid)
@@ -880,6 +880,11 @@ def cmdrun(args):
         print(f"Error: Sandbox '{botroot}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = str(botwork)
+
     _laia_env = botroot / "env"
     if _laia_env.exists():
         content = _laia_env.read_text()
@@ -900,14 +905,14 @@ def cmdrun(args):
         f"LOGNAME={bot}",
         f"PATH={_stored_path}",
         "TERM=xterm-256color",
-        f"PWD={botwork}",
+        f"PWD={cwd}",
         "PS1=\\[\\033[1;32m\\]\\u@{bot}\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
     ]
 
     sudocmd = [
         "sudo", "-u", bot,
         "env", "-i", *envargs,
-        "zsh", "-c", f"cd '{botwork}' && umask 007 && exec \"$@\"",
+        "zsh", "-c", f"cd '{cwd}' && umask 007 && exec \"$@\"",
         "--", *command,
     ]
 
@@ -933,6 +938,11 @@ def cmdshell(args):
         print(f"Error: Sandbox '{botroot}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = str(botwork)
+
     _laia_env = botroot / "env"
     if _laia_env.exists():
         content = _laia_env.read_text()
@@ -953,14 +963,14 @@ def cmdshell(args):
         f"LOGNAME={bot}",
         f"PATH={_stored_path}",
         "TERM=xterm-256color",
-        f"PWD={botwork}",
+        f"PWD={cwd}",
         "PS1=\\[\\033[1;32m\\]\\u@{bot}\\[\\033[0m\\]:\\[\\033[1;34m\\]\\w\\[\\033[0m\\]\\$ ",
     ]
 
     sudocmd = [
         "sudo", "-u", bot,
         "env", "-i", *envargs,
-        shell, "-c", f"cd '{botwork}' && exec {shell} -l -i",
+        shell, "-c", f"cd '{cwd}' && exec {shell} -l -i",
     ]
 
     try:
