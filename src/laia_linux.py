@@ -6,6 +6,7 @@ Handles lifecycle management (init, create, disable, destroy) and secure executi
 
 import sys
 import os
+import stat
 import shutil
 import subprocess
 import argparse
@@ -748,6 +749,43 @@ def cmdnoshare(args):
         sys.exit(1)
 
 
+def _ensure_oxtraverse(path, force=False):
+    ancestors = [Path(path).resolve()]
+    ancestors.extend(ancestors[0].parents)
+    ancestors = list(reversed(ancestors))
+    missing = []
+    for d in ancestors:
+        try:
+            mode = os.stat(d).st_mode
+            if not (mode & stat.S_IXOTH):
+                missing.append(d)
+        except OSError:
+            pass
+    if not missing:
+        return
+    skip_owned = [d for d in missing if os.stat(d).st_uid != os.getuid()]
+    changeable = [d for d in missing if os.stat(d).st_uid == os.getuid()]
+    if force:
+        for d in changeable:
+            d.chmod(d.stat().st_mode | stat.S_IXOTH)
+            print(f"-> Added o+x to '{d}'.")
+        for d in skip_owned:
+            print(f"Warning: cannot change '{d}' (not owned by you).", file=sys.stderr)
+        return
+    print("Warning: The bot needs o+x (world-traversable) on each directory along the\npath. These directories are missing it:\n")
+    for d in missing:
+        owner = " (not owned by you)" if os.stat(d).st_uid != os.getuid() else ""
+        print(f"  {d}{owner}")
+    print()
+    ans = input("Add o+x to these directories? [y/N]: ").strip().lower()
+    if ans == "y":
+        for d in changeable:
+            d.chmod(d.stat().st_mode | stat.S_IXOTH)
+            print(f"-> Added o+x to '{d}'.")
+        for d in skip_owned:
+            print(f"Warning: cannot change '{d}' (not owned by you).", file=sys.stderr)
+
+
 def cmdrun(args):
     """Wipe environment and execute a command inside the bot's sandbox."""
     bot = args.bot
@@ -779,6 +817,41 @@ def cmdrun(args):
             _stored_path = "/usr/local/bin:/usr/bin:/bin"
     else:
         _stored_path = "/usr/local/bin:/usr/bin:/bin"
+
+    if command:
+        cmd = shutil.which(command[0], path=_stored_path)
+        if cmd:
+            _ensure_oxtraverse(Path(cmd).parent, getattr(args, 'force', False))
+            # Also ensure the command file itself is world-executable (o+x)
+            try:
+                mode = os.stat(cmd).st_mode
+                if not (mode & stat.S_IXOTH):
+                    owner_uid = os.stat(cmd).st_uid
+                    owned = (owner_uid == os.getuid())
+                    if getattr(args, 'force', False):
+                        if owned:
+                            try:
+                                os.chmod(cmd, mode | stat.S_IXOTH)
+                                print(f"-> Added o+x to '{cmd}'.")
+                            except Exception:
+                                print(f"Warning: cannot change execute permission for '{cmd}'", file=sys.stderr)
+                        else:
+                            print(f"Warning: cannot change '{cmd}' (not owned by you).", file=sys.stderr)
+                    else:
+                        owner_note = " (not owned by you)" if not owned else ""
+                        print(f"Warning: The command '{cmd}' is not world-executable{owner_note}.")
+                        ans = input(f"Add o+x to '{cmd}' to allow execution? [y/N]: ").strip().lower()
+                        if ans == 'y':
+                            if owned:
+                                try:
+                                    os.chmod(cmd, mode | stat.S_IXOTH)
+                                    print(f"-> Added o+x to '{cmd}'.")
+                                except Exception:
+                                    print(f"Warning: cannot change execute permission for '{cmd}'", file=sys.stderr)
+                            else:
+                                print(f"Warning: cannot change '{cmd}' (not owned by you).", file=sys.stderr)
+            except OSError:
+                pass
 
     envargs = [
         f"HOME={bothome}",
@@ -837,6 +910,9 @@ def cmdshell(args):
             _stored_path = "/usr/local/bin:/usr/bin:/bin"
     else:
         _stored_path = "/usr/local/bin:/usr/bin:/bin"
+
+    # Ensure the current working directory is world-traversable (o+x) so the bot can cd to it
+    _ensure_oxtraverse(Path(cwd), getattr(args, 'force', False))
 
     envargs = [
         f"HOME={bothome}",
@@ -946,10 +1022,12 @@ def main():
         "--shell", "-s", default="bash",
         help="Shell to launch (default: bash).",
     )
+    parser_shell.add_argument("--force", "-f", action="store_true", help="Apply o+x changes without prompting.")
 
     parser_run = subparsers.add_parser("run", help="Run a command securely inside a bot's sandbox.")
     parser_run.add_argument("bot", help="Name of the bot container to execute in.")
     parser_run.add_argument("command", nargs=argparse.REMAINDER, help="Command and arguments to run.")
+    parser_run.add_argument("--force", "-f", action="store_true", help="Apply o+x changes without prompting.")
 
     args = parser.parse_args()
 
@@ -962,6 +1040,7 @@ def main():
         "destroy": cmddestroy,
         "share": cmdshare,
         "noshare": cmdnoshare,
+        "shell": cmdshell,
         "run": cmdrun,
     }
 
